@@ -1,0 +1,44 @@
+[project]
+name = "car-damage-inpainting"
+version = "0.1.0"
+description = "Car damage inpainting system using AI APIs"
+authors = [
+    {name = "AI Assistant", email = "assistant@example.com"}
+]
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "opencv-python>=4.8.0",
+    "numpy>=1.21.0",
+    "pillow>=9.0.0",
+    "matplotlib>=3.5.0",
+    "requests>=2.28.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "black>=23.0.0",
+    "flake8>=6.0.0",
+]
+
+# Optional extras for EditTool (Qwen Image Edit)
+edit = [
+    "diffusers>=0.30.0",
+    # Torch installation varies by platform; see README for instructions
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+include = [
+    "inpaint.py",
+    "test.py", 
+    "demo.py",
+    "config.py",
+    "README.md",
+    "requirements.txt",
+    "setup_uv.sh"
+]
