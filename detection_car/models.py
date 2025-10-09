@@ -6,9 +6,6 @@ Model definitions for car image binary classification.
 from typing import Tuple
 import torch
 import torch.nn as nn
-from utils import plot_training_curves
-
-
 
 class VanillaClassifier(nn.Module):
     """Multi-layer perceptron classifier that includes basic image preprocessing and flattening.
@@ -205,8 +202,3 @@ def get_sklearn_model(model_name: str, **kwargs):
         return SVC(kernel="linear", probability=True, **kwargs)
     raise ValueError("Unknown sklearn model. Use 'logreg' or 'svm'.")
 
-
-# --------- Convenience plotting helper ---------
-def plot_losses(train_losses, val_losses=None, title: str = "Training and Validation Loss", save_path: str = None, show: bool = True):
-    """Thin wrapper to call `utils.plot_training_curves`."""
-    return plot_training_curves(train_losses, val_losses=val_losses, title=title, save_path=save_path, show=show)

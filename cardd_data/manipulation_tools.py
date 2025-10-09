@@ -485,13 +485,22 @@ class EditTool(ManipulationTool):
             raise RuntimeError("Edit API returned non-image response")
 
     def get_default_parameters(self) -> Dict[str, Any]:
-        return {
-            "prompt": DEFAULT_PROMPT,
-            "num_inference_steps": 20,
-            "true_cfg_scale": 2.5,
-            "negative_prompt": "no change to the undamaged parts of the car in the image, and should not keep the original damage",
-            "fallback": getattr(self, 'fallback', False)
-        }
+        if self.model_name == "Kontext":
+            return {
+                "prompt": DEFAULT_PROMPT,
+                "num_inference_steps": 20,
+                "true_cfg_scale": 2.5,
+                "negative_prompt": "no change to the undamaged parts of the car in the image, and should not keep the original damage",
+                "fallback": getattr(self, 'fallback', False)
+            }
+        else:
+            return {
+                "prompt": DEFAULT_PROMPT,
+                "num_inference_steps": 20,
+                "true_cfg_scale": 2.5,
+                "negative_prompt": "no change to the undamaged parts of the car, and should not keep the original damage",
+                "fallback": getattr(self, 'fallback', False)
+            }
 
     def validate_parameters(self, **kwargs) -> bool:
         try:
@@ -542,7 +551,7 @@ def test_edit_tool_basic():
 
         tool = EditTool(use_local=True, output_dir="./api_debug", fallback=False)
         out_path = tool.process_image(image_path, 
-            prompt='on this car, add minor scratch marks, light surface damage, subtle wear', 
+            prompt='a green car with a red hood', 
             num_inference_steps=10,
             negative_prompt="no change to the undamaged parts of the car in the image")
         print(f"✓ EditTool local produced: {out_path}")

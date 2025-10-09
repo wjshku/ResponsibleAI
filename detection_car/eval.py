@@ -17,7 +17,8 @@ import torch
 import torch.nn as nn
 
 from data_loader import CarScratchDataset, create_dataloader, get_eval_transforms
-from models import get_model, plot_losses
+from models import get_model
+from utils import plot_losses
 
 # Optional rich CLI support
 try:
@@ -83,10 +84,12 @@ def main():
         max_list = int(input("How many recent runs to list? [30]: ").strip() or "30")
     except Exception:
         max_list = 30
-    data_dir = input("Data directory [/Users/wjs/Library/CloudStorage/OneDrive-Personal/Coding, ML & DL/ResponsibleAI/cardd_data/manipulated_results]: ").strip() or \
-        "/Users/wjs/Library/CloudStorage/OneDrive-Personal/Coding, ML & DL/ResponsibleAI/cardd_data/manipulated_results"
-    metadata_dir = input("Metadata directory [/Users/wjs/Library/CloudStorage/OneDrive-Personal/Coding, ML & DL/ResponsibleAI/cardd_data/manipulated_results/metadata]: ").strip() or \
-        "/Users/wjs/Library/CloudStorage/OneDrive-Personal/Coding, ML & DL/ResponsibleAI/cardd_data/manipulated_results/metadata"
+    img2img_type, data_type = "Kontext", "CarDD-TE"
+    base_dir = f"/Users/wjs/Library/CloudStorage/OneDrive-Personal/Coding, ML & DL/ResponsibleAI/cardd_data/GenAI_Results/{img2img_type}/{data_type}"
+    data_dir = input(f"Data directory [{base_dir}]: ").strip() or \
+        base_dir
+    metadata_dir = input(f"Metadata directory [{base_dir}/metadata]: ").strip() or \
+        f"{base_dir}/metadata"
     try:
         batch_size = int(input("Batch size [32]: ").strip() or "32")
     except Exception:

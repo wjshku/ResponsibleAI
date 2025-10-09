@@ -23,8 +23,8 @@ from data_loader import (
     get_default_transforms,
     get_eval_transforms,
 )
-from models import get_model, plot_losses
-from utils import save_pytorch_model
+from models import get_model
+from utils import save_pytorch_model, plot_losses
 
 
 

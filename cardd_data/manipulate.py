@@ -80,13 +80,13 @@ def edit_pipeline():
     print("Starting full dataset processing with local API...")
     
     try:
-        dataset_type = "CarDD-TR"
-        
+        dataset_type = "CarDD-VAL"
+        model_name = "Qwen Image Edit"
         manipulator = Manipulator(
             dataset_path=f"{SOD_PATH}/{dataset_type}", 
-            output_dir=f"./GenAI_Results/Kontext/{dataset_type}",
+            output_dir=f"./GenAI_Results/{model_name}/{dataset_type}",
             tool="edit",
-            model_name="Flux Kontext dev",
+            model_name=model_name,
             model_version="1.0.0",
             model_provider="local-edit",
             use_local=True,
@@ -107,7 +107,7 @@ def edit_pipeline():
             use_random_prompts=True,
             custom_prompt=None,
             max_samples=None,
-            start_index=1502
+            start_index=24
         )
         
         if results["success"]:

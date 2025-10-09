@@ -98,6 +98,11 @@ def plot_training_curves(train_losses, val_losses=None, title: str = "Training a
     else:
         plt.close()
 
+def plot_losses(train_losses, val_losses=None, title: str = "Training and Validation Loss", save_path: str = None, show: bool = True):
+    """Thin wrapper to call `utils.plot_training_curves`."""
+    return plot_training_curves(train_losses, val_losses=val_losses, title=title, save_path=save_path, show=show)
+
+
 # ---------------------- Model Utilities (from model_utils.py) ----------------------
 
 def create_model_directory(base_dir: str = "models") -> Path:
