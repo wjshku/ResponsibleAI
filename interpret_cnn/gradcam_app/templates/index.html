@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Grad-CAM Analysis</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .controls {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+        .control-group {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+        label {
+            font-weight: bold;
+            color: #555;
+        }
+        input, select, button {
+            padding: 8px 12px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 14px;
+        }
+        button {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        button:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+        .status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 5px;
+            font-weight: bold;
+        }
+        .status.success {
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .status.error {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .status.info {
+            background-color: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
+        .visualization {
+            text-align: center;
+            margin: 20px 0;
+        }
+        .visualization img {
+            max-width: 100%;
+            height: auto;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+        .loading {
+            text-align: center;
+            padding: 20px;
+            color: #666;
+        }
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #007bff;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 10px;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Grad-CAM Analysis for Car Scratch Detection</h1>
+        
+        <div class="controls">
+            <div class="control-group">
+                <label for="modelPath">Model Path:</label>
+                <input type="text" id="modelPath" value="../../detection_car/models/model_20251006_172724/cnn_best.pth">
+            </div>
+            <div class="control-group">
+                <label for="dataDir">Data Directory:</label>
+                <input type="text" id="dataDir" value="/Users/wjs/Library/CloudStorage/OneDrive-Personal/Coding, ML & DL/ResponsibleAI/cardd_data/GenAI_Results/SD2/CarDD-TE">
+            </div>
+            <div class="control-group">
+                <label for="sampleIdx">Sample Index (optional):</label>
+                <input type="number" id="sampleIdx" placeholder="Random if empty" min="0">
+            </div>
+            <div class="control-group">
+                <button onclick="loadModel()" id="loadBtn">Load Model</button>
+            </div>
+            <div class="control-group">
+                <button onclick="getRandomSample()" id="sampleBtn" disabled>Get Random Sample</button>
+            </div>
+        </div>
+        
+        <div id="status"></div>
+        <div id="visualization"></div>
+    </div>
+
+    <script>
+        let modelLoaded = false;
+        let totalSamples = 0;
+        
+        function showStatus(message, type = 'info') {
+            const statusDiv = document.getElementById('status');
+            statusDiv.innerHTML = `<div class="status ${type}">${message}</div>`;
+        }
+        
+        function showLoading(message) {
+            const statusDiv = document.getElementById('status');
+            statusDiv.innerHTML = `
+                <div class="status info">
+                    <div class="spinner"></div>
+                    ${message}
+                </div>
+            `;
+        }
+        
+        async function loadModel() {
+            const modelPath = document.getElementById('modelPath').value;
+            const dataDir = document.getElementById('dataDir').value;
+            
+            if (!modelPath || !dataDir) {
+                showStatus('Please provide both model path and data directory', 'error');
+                return;
+            }
+            
+            showLoading('Loading model and dataset...');
+            
+            try {
+                const response = await fetch('/load_model', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        model_path: modelPath,
+                        data_dir: dataDir
+                    })
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    modelLoaded = true;
+                    totalSamples = result.num_samples;
+                    document.getElementById('sampleBtn').disabled = false;
+                    showStatus(`Model loaded successfully! Dataset has ${result.num_samples} samples. Target size: ${result.target_size}`, 'success');
+                } else {
+                    showStatus(`Error: ${result.error}`, 'error');
+                }
+            } catch (error) {
+                showStatus(`Error: ${error.message}`, 'error');
+            }
+        }
+        
+        async function getRandomSample() {
+            if (!modelLoaded) {
+                showStatus('Please load model first', 'error');
+                return;
+            }
+            
+            const sampleIdx = document.getElementById('sampleIdx').value;
+            showLoading('Generating Grad-CAM visualization...');
+            
+            try {
+                const response = await fetch('/get_sample', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        sample_idx: sampleIdx ? parseInt(sampleIdx) : null
+                    })
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    document.getElementById('visualization').innerHTML = `
+                        <div class="visualization">
+                            <h3>Sample ${result.sample_idx} - Image ID: ${result.image_id}</h3>
+                            <img src="data:image/png;base64,${result.image}" alt="Grad-CAM Analysis">
+                            <p><strong>Original Score:</strong> ${result.original_score.toFixed(4)} | <strong>Processed Score:</strong> ${result.processed_score.toFixed(4)}</p>
+                        </div>
+                    `;
+                    showStatus('Visualization generated successfully!', 'success');
+                } else {
+                    showStatus(`Error: ${result.error}`, 'error');
+                }
+            } catch (error) {
+                showStatus(`Error: ${error.message}`, 'error');
+            }
+        }
+        
+        // Allow Enter key to trigger random sample
+        document.getElementById('sampleIdx').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter' && modelLoaded) {
+                getRandomSample();
+            }
+        });
+    </script>
+</body>
+</html>

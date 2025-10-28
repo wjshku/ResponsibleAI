@@ -1,0 +1,9 @@
+---
+alwaysApply: true
+---
+
+Test code in terminal only! Do not add new test cases without permission.
+Do not write test cases in the code or add test code files!
+Run the code in 'conda activate genai', packages are installed there.
+
+Write simple, minimal code without repitition and redundency.

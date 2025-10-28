@@ -33,9 +33,8 @@ def inpaint_pipeline():
             model_version="1.0.0",
             model_provider="local-inpainter",
             use_local=True,
-            api_url="http://3.115.116.28:8000/inpaint",  # Custom API endpoint
-            # api_url="http://3.113.213.110:8000/inpaint",
-            fallback=False  # Set to True to return original images without processing
+            api_url="http://3.115.116.28:8000/inpaint",
+            fallback=False
         )
         
         print(f"✅ Manipulator initialized successfully")
@@ -80,7 +79,7 @@ def edit_pipeline():
     print("Starting full dataset processing with local API...")
     
     try:
-        dataset_type = "CarDD-VAL"
+        dataset_type = "CarDD-TR"
         model_name = "Qwen Image Edit"
         manipulator = Manipulator(
             dataset_path=f"{SOD_PATH}/{dataset_type}", 
@@ -107,7 +106,7 @@ def edit_pipeline():
             use_random_prompts=True,
             custom_prompt=None,
             max_samples=None,
-            start_index=24
+            start_index=2564
         )
         
         if results["success"]:

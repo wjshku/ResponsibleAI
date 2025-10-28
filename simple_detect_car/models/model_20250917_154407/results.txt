@@ -1,0 +1,29 @@
+Model: cnn
+Type: PyTorch
+Timestamp: 2025-09-17 15:44:07
+Parameters: 1,718,401
+Best Test Accuracy: 81.00%
+Final Train Loss: 0.4909
+Final Train Accuracy: 78.75%
+Final Test Loss: 0.4996
+Final Test Accuracy: 81.00%
+Epochs: 20
+Learning Rate: 0.0001
+Batch Size: 32
+Train Samples: 400
+Test Samples: 100
+
+Configuration:
+  data_dir: /Users/wjs/Library/CloudStorage/OneDrive-Personal/Coding, ML & DL/ResponsibleAI/cardd_data/manipulated_results
+  metadata_dir: /Users/wjs/Library/CloudStorage/OneDrive-Personal/Coding, ML & DL/ResponsibleAI/cardd_data/manipulated_results/metadata
+  sample_size: 500
+  shuffle: True
+  target_size: (512, 512)
+  batch_size: 32
+  test_size: 0.2
+  learning_rate: 0.0001
+  num_epochs: 20
+  model_name: cnn
+  hidden_size: 64
+  dropout: 0.2
+  random_state: 42
