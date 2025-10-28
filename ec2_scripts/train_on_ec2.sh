@@ -97,30 +97,35 @@ if [ "$TRAINING_TYPE" == "1" ]; then
             NUM_EPOCHS=10
             BATCH_SIZE=32
             FEATURE_HIDDEN_SIZE=256
+            GAMMA=10.0
             ;;
         2)
             SAMPLE_SIZE=3000
             NUM_EPOCHS=30
             BATCH_SIZE=32
             FEATURE_HIDDEN_SIZE=256
+            GAMMA=10.0
             ;;
         3)
             SAMPLE_SIZE="None"
             NUM_EPOCHS=50
             BATCH_SIZE=32
             FEATURE_HIDDEN_SIZE=256
+            GAMMA=10.0
             ;;
         4)
             SAMPLE_SIZE="None"
             NUM_EPOCHS=100
             BATCH_SIZE=32
             FEATURE_HIDDEN_SIZE=256
+            GAMMA=10.0
             ;;
         5)
             read -p "Sample size (or 'None' for all): " SAMPLE_SIZE
             read -p "Number of epochs: " NUM_EPOCHS
             read -p "Batch size: " BATCH_SIZE
             read -p "Feature hidden size: " FEATURE_HIDDEN_SIZE
+            read -p "Gamma (lambda schedule sharpness, default 10.0): " GAMMA
             ;;
         *)
             echo "Invalid choice"
@@ -134,6 +139,7 @@ if [ "$TRAINING_TYPE" == "1" ]; then
     echo "  Epochs: $NUM_EPOCHS"
     echo "  Batch size: $BATCH_SIZE"
     echo "  Feature hidden size: $FEATURE_HIDDEN_SIZE"
+    echo "  Gamma (lambda schedule): $GAMMA"
     echo ""
 else
     # Simple Detect configuration
@@ -237,6 +243,11 @@ content = re.sub(
 content = re.sub(
     r"'feature_hidden_size': \d+,",
     "'feature_hidden_size': $FEATURE_HIDDEN_SIZE,",
+    content
+)
+content = re.sub(
+    r"'gamma': [\d.]+,",
+    "'gamma': $GAMMA,",
     content
 )
 

@@ -97,7 +97,7 @@ class DualDomainDataset(Dataset):
 # ============================================
 def train_dann_epoch(model, source_loader, target_loader,
                      criterion_label, criterion_domain,
-                     optimizer, device, epoch, total_epochs):
+                     optimizer, device, epoch, total_epochs, gamma=10.0):
     """
     Train DANN for one epoch.
 
@@ -116,6 +116,7 @@ def train_dann_epoch(model, source_loader, target_loader,
         device: Device (CPU/CUDA/MPS)
         epoch: Current epoch number (0-indexed)
         total_epochs: Total number of epochs
+        gamma: Sharpness of lambda schedule (default 10.0 from DANN paper)
 
     Returns:
         Dictionary with training metrics
@@ -123,7 +124,7 @@ def train_dann_epoch(model, source_loader, target_loader,
     model.train()
 
     # Compute lambda using schedule from DANN paper
-    lambda_p = compute_lambda_schedule(epoch, total_epochs, gamma=2.0)
+    lambda_p = compute_lambda_schedule(epoch, total_epochs, gamma=gamma)
 
     # Tracking metrics
     total_label_loss = 0.0
@@ -457,6 +458,9 @@ def main():
         'domain_hidden_size': 64,
         'dropout': 0.2,
 
+        # Lambda schedule
+        'gamma': 10.0,  # Sharpness of lambda schedule (default 10.0 from DANN paper)
+
         # Other
         'random_state': 42
     }
@@ -617,7 +621,7 @@ def main():
         train_metrics = train_dann_epoch(
             model, source_loader, target_loader,
             criterion_label, criterion_domain,
-            optimizer, device, epoch, config['num_epochs']
+            optimizer, device, epoch, config['num_epochs'], config['gamma']
         )
         train_time = time.time() - epoch_start_time
 
