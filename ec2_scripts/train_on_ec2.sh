@@ -422,13 +422,13 @@ if ! python -c "import torch" 2>/dev/null; then
 
     # Install other dependencies
     echo "Installing other dependencies..."
-    uv pip install -r requirements.txt
+    uv pip install -r ec2_scripts/requirements.txt
 
     echo "✓ Dependencies installed"
 else
     echo "✓ PyTorch already installed"
     # Still install/update other dependencies
-    uv pip install -r requirements.txt --quiet 2>/dev/null || true
+    uv pip install -r ec2_scripts/requirements.txt --quiet 2>/dev/null || true
 fi
 
 # Verify installation
