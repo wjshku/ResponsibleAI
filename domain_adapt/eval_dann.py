@@ -260,6 +260,29 @@ def main():
         'dropout': config.get('dropout', 0.3),
     }
 
+    # Print configuration
+    print("\n" + "=" * 70)
+    print("EVALUATION CONFIGURATION")
+    print("=" * 70)
+    print(f"Model Directory:     {eval_config['model_dir']}")
+    print(f"Batch Size:          {eval_config['batch_size']}")
+    print(f"Target Size:         {eval_config['target_size']}")
+    print(f"Input Channels:      {eval_config['input_channels']}")
+    print(f"Number of Classes:   {eval_config['num_classes']}")
+    print(f"Feature Hidden Size: {eval_config['feature_hidden_size']}")
+    print(f"Domain Hidden Size:  {eval_config['domain_hidden_size']}")
+    print(f"Dropout Rate:        {eval_config['dropout']}")
+
+    # Print training config from metadata if available
+    if config:
+        print(f"\nTraining Configuration:")
+        print(f"  Learning Rate:     {config.get('learning_rate', 'N/A')}")
+        print(f"  Number of Epochs:  {config.get('num_epochs', 'N/A')}")
+        print(f"  Sample Size:       {config.get('sample_size', 'N/A')}")
+        print(f"  Gamma (λ):         {config.get('gamma', 'N/A')}")
+        print(f"  Zeta (η):          {config.get('zeta', 'N/A')}")
+    print("=" * 70)
+
     # Data paths
     base_path = "/Users/wjs/Library/CloudStorage/OneDrive-Personal/Coding, ML & DL/ResponsibleAI/cardd_data/GenAI_Results"
 

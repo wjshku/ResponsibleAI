@@ -116,7 +116,9 @@ class CarScratchDataset:
         if sample_size is not None and sample_size < len(successful_entries):
             random.seed(random_seed)
             # Sample first, then validate only the sampled entries
-            sampled_entries = random.sample(successful_entries, sample_size * 2)  # Sample 2x to account for missing files
+            # Use min() to avoid sampling more than the population size
+            sample_candidates = min(len(successful_entries), sample_size * 2)
+            sampled_entries = random.sample(successful_entries, sample_candidates)  # Sample 2x to account for missing files
             print(f"Sampled {len(sampled_entries)} candidates from {len(successful_entries)} successful entries")
         else:
             sampled_entries = successful_entries

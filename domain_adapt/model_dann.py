@@ -262,12 +262,12 @@ def get_dann_model(input_channels=3,
 # ============================================
 # Lambda Schedule (from DANN paper)
 # ============================================
-def compute_lambda_schedule(epoch, total_epochs, gamma=10.0):
+def compute_lambda_schedule(epoch, total_epochs, gamma=10.0, zeta=1.0):
     """
     Compute lambda parameter using schedule from DANN paper.
 
-    Lambda gradually increases from 0 to 1 during training following:
-        lambda_p = 2 / (1 + exp(-gamma * p)) - 1
+    Lambda gradually increases from 0 to zeta during training following:
+        lambda_p = zeta * (2 / (1 + exp(-gamma * p)) - 1)
 
     where p = epoch / total_epochs (training progress)
 
@@ -275,13 +275,14 @@ def compute_lambda_schedule(epoch, total_epochs, gamma=10.0):
         epoch: Current epoch (0-indexed)
         total_epochs: Total number of training epochs
         gamma: Sharpness of the schedule (default: 10.0 from paper)
+        zeta: Maximum adaptation strength in [0, 1] (default: 1.0)
 
     Returns:
-        lambda_p: Adaptation strength in [0, 1]
+        lambda_p: Adaptation strength in [0, zeta]
     """
     import numpy as np
     p = float(epoch) / float(total_epochs)
-    lambda_p = 2.0 / (1.0 + np.exp(-gamma * p)) - 1.0
+    lambda_p = zeta * (2.0 / (1.0 + np.exp(-gamma * p)) - 1.0)
     return lambda_p
 
 

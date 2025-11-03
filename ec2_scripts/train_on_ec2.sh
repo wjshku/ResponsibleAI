@@ -2,7 +2,8 @@
 # ============================================
 # Launch Training on EC2
 # ============================================
-# This script starts DANN training on the EC2 instance
+# This script starts ML training on EC2 (DANN, CNN, or scikit-learn models)
+# Supports multiple concurrent runs with unique timestamped session names
 
 set -e
 
@@ -42,17 +43,17 @@ case $TRAINING_TYPE in
     1)
         TRAINING_DIR="domain_adapt"
         TRAINING_SCRIPT="train_dann.py"
-        SESSION_NAME="dann_training"
+        SESSION_NAME="dann_training_$(date +%Y%m%d_%H%M%S)"
         ;;
     2)
         TRAINING_DIR="simple_detect_car"
         TRAINING_SCRIPT="train_nn.py"
-        SESSION_NAME="nn_training"
+        SESSION_NAME="nn_training_$(date +%Y%m%d_%H%M%S)"
         ;;
     3)
         TRAINING_DIR="simple_detect_car"
         TRAINING_SCRIPT="train_sk.py"
-        SESSION_NAME="sk_training"
+        SESSION_NAME="sk_training_$(date +%Y%m%d_%H%M%S)"
         ;;
     *)
         echo "Invalid choice"
@@ -96,36 +97,51 @@ if [ "$TRAINING_TYPE" == "1" ]; then
             SAMPLE_SIZE=1000
             NUM_EPOCHS=10
             BATCH_SIZE=32
+            LEARNING_RATE=0.001
             FEATURE_HIDDEN_SIZE=256
+            DOMAIN_HIDDEN_SIZE=64
             GAMMA=10.0
+            ZETA=1.0
             ;;
         2)
             SAMPLE_SIZE=3000
             NUM_EPOCHS=30
             BATCH_SIZE=32
+            LEARNING_RATE=0.001
             FEATURE_HIDDEN_SIZE=256
+            DOMAIN_HIDDEN_SIZE=64
             GAMMA=10.0
+            ZETA=1.0
             ;;
         3)
             SAMPLE_SIZE="None"
             NUM_EPOCHS=50
             BATCH_SIZE=32
+            LEARNING_RATE=0.001
             FEATURE_HIDDEN_SIZE=256
+            DOMAIN_HIDDEN_SIZE=64
             GAMMA=10.0
+            ZETA=1.0
             ;;
         4)
             SAMPLE_SIZE="None"
             NUM_EPOCHS=100
             BATCH_SIZE=32
+            LEARNING_RATE=0.001
             FEATURE_HIDDEN_SIZE=256
+            DOMAIN_HIDDEN_SIZE=64
             GAMMA=10.0
+            ZETA=1.0
             ;;
         5)
             read -p "Sample size (or 'None' for all): " SAMPLE_SIZE
             read -p "Number of epochs: " NUM_EPOCHS
             read -p "Batch size: " BATCH_SIZE
+            read -p "Learning rate (default 0.001): " LEARNING_RATE
             read -p "Feature hidden size: " FEATURE_HIDDEN_SIZE
+            read -p "Domain hidden size (default 64): " DOMAIN_HIDDEN_SIZE
             read -p "Gamma (lambda schedule sharpness, default 10.0): " GAMMA
+            read -p "Zeta (max adaptation strength 0-1, default 1.0): " ZETA
             ;;
         *)
             echo "Invalid choice"
@@ -138,8 +154,11 @@ if [ "$TRAINING_TYPE" == "1" ]; then
     echo "  Sample size: $SAMPLE_SIZE"
     echo "  Epochs: $NUM_EPOCHS"
     echo "  Batch size: $BATCH_SIZE"
+    echo "  Learning rate: $LEARNING_RATE"
     echo "  Feature hidden size: $FEATURE_HIDDEN_SIZE"
+    echo "  Domain hidden size: $DOMAIN_HIDDEN_SIZE"
     echo "  Gamma (lambda schedule): $GAMMA"
+    echo "  Zeta (max adaptation): $ZETA"
     echo ""
 else
     # Simple Detect configuration
@@ -218,7 +237,7 @@ if [ "$TRAINING_TYPE" == "1" ]; then
     ssh -i "$EC2_KEY_PATH" "$EC2_SSH_USER@$EC2_PUBLIC_IP" << EOF
 cd ~/ResponsibleAI/domain_adapt
 
-python3 << 'PYTHON_EOF'
+python3 << PYTHON_EOF
 import re
 
 with open('train_dann.py', 'r') as f:
@@ -228,6 +247,11 @@ with open('train_dann.py', 'r') as f:
 content = re.sub(
     r"'batch_size': \d+,",
     "'batch_size': $BATCH_SIZE,",
+    content
+)
+content = re.sub(
+    r"'learning_rate': [^,]+,",
+    "'learning_rate': $LEARNING_RATE,",
     content
 )
 content = re.sub(
@@ -246,8 +270,18 @@ content = re.sub(
     content
 )
 content = re.sub(
+    r"'domain_hidden_size': \d+,",
+    "'domain_hidden_size': $DOMAIN_HIDDEN_SIZE,",
+    content
+)
+content = re.sub(
     r"'gamma': [\d.]+,",
     "'gamma': $GAMMA,",
+    content
+)
+content = re.sub(
+    r"'zeta': [\d.]+,",
+    "'zeta': $ZETA,",
     content
 )
 

@@ -97,14 +97,14 @@ class DualDomainDataset(Dataset):
 # ============================================
 def train_dann_epoch(model, source_loader, target_loader,
                      criterion_label, criterion_domain,
-                     optimizer, device, epoch, total_epochs, gamma=10.0):
+                     optimizer, device, epoch, total_epochs, config, gamma=10.0, zeta=1.0):
     """
     Train DANN for one epoch.
 
     Key aspects:
     1. Label loss computed on ALL source images (real + fake)
     2. Domain loss computed ONLY on fake images (SD2-fakes vs Kontext-fakes)
-    3. Lambda gradually increases from 0 to 1
+    3. Lambda gradually increases from 0 to zeta
 
     Args:
         model: DomainAdversarialNN model
@@ -116,7 +116,9 @@ def train_dann_epoch(model, source_loader, target_loader,
         device: Device (CPU/CUDA/MPS)
         epoch: Current epoch number (0-indexed)
         total_epochs: Total number of epochs
+        config: Configuration dictionary containing learning_rate and other settings
         gamma: Sharpness of lambda schedule (default 10.0 from DANN paper)
+        zeta: Maximum adaptation strength (default 1.0 for full adaptation)
 
     Returns:
         Dictionary with training metrics
@@ -124,7 +126,7 @@ def train_dann_epoch(model, source_loader, target_loader,
     model.train()
 
     # Compute lambda using schedule from DANN paper
-    lambda_p = compute_lambda_schedule(epoch, total_epochs, gamma=gamma)
+    lambda_p = compute_lambda_schedule(epoch, total_epochs, gamma=gamma, zeta=zeta)
 
     # Tracking metrics
     total_label_loss = 0.0
@@ -134,6 +136,10 @@ def train_dann_epoch(model, source_loader, target_loader,
     label_total = 0
     domain_correct = 0
     domain_total = 0
+    source_domain_correct = 0
+    source_domain_total = 0
+    target_domain_correct = 0
+    target_domain_total = 0
     num_batches = 0
 
     # Confusion matrix for precision/recall calculation
@@ -204,13 +210,16 @@ def train_dann_epoch(model, source_loader, target_loader,
             src_fake_domain_pred = src_domain_pred[src_fake_mask]
             src_fake_domain_labels = torch.zeros(src_fake_mask.sum(), device=device)  # 0 = SD2
             domain_loss = domain_loss + criterion_domain(
-                src_fake_domain_pred.squeeze(),
+                src_fake_domain_pred.flatten(),
                 src_fake_domain_labels
             )
             # Track accuracy
             src_domain_pred_binary = (src_fake_domain_pred.squeeze() > 0.5).float()
-            domain_correct += (src_domain_pred_binary == src_fake_domain_labels).sum().item()
+            src_correct = (src_domain_pred_binary == src_fake_domain_labels).sum().item()
+            domain_correct += src_correct
+            source_domain_correct += src_correct
             domain_total += src_fake_mask.sum().item()
+            source_domain_total += src_fake_mask.sum().item()
 
         # Target domain: Extract fake images (Kontext-generated fakes)
         tgt_fake_mask = tgt_is_fake.bool()
@@ -218,13 +227,16 @@ def train_dann_epoch(model, source_loader, target_loader,
             tgt_fake_domain_pred = tgt_domain_pred[tgt_fake_mask]
             tgt_fake_domain_labels = torch.ones(tgt_fake_mask.sum(), device=device)  # 1 = Kontext
             domain_loss = domain_loss + criterion_domain(
-                tgt_fake_domain_pred.squeeze(),
+                tgt_fake_domain_pred.flatten(),
                 tgt_fake_domain_labels
             )
             # Track accuracy
             tgt_domain_pred_binary = (tgt_fake_domain_pred.squeeze() > 0.5).float()
-            domain_correct += (tgt_domain_pred_binary == tgt_fake_domain_labels).sum().item()
+            tgt_correct = (tgt_domain_pred_binary == tgt_fake_domain_labels).sum().item()
+            domain_correct += tgt_correct
+            target_domain_correct += tgt_correct
             domain_total += tgt_fake_mask.sum().item()
+            target_domain_total += tgt_fake_mask.sum().item()
 
         # ============================================
         # Total Loss
@@ -270,7 +282,8 @@ def train_dann_epoch(model, source_loader, target_loader,
             pbar.set_postfix({
                 'loss': f'{total_loss/num_batches:.4f}',
                 'acc': f'{100.0*label_correct/max(1,label_total):.1f}%',
-                'λ': f'{lambda_p:.3f}'
+                'λ': f'{lambda_p:.3f}',
+                'lr': f'{config["learning_rate"]:.4f}'
             })
 
     # Compute average metrics
@@ -279,6 +292,8 @@ def train_dann_epoch(model, source_loader, target_loader,
     avg_total_loss = total_loss / num_batches
     label_accuracy = 100.0 * label_correct / max(1, label_total)
     domain_accuracy = 100.0 * domain_correct / max(1, domain_total)
+    source_domain_accuracy = 100.0 * source_domain_correct / max(1, source_domain_total)
+    target_domain_accuracy = 100.0 * target_domain_correct / max(1, target_domain_total)
 
     # Calculate precision and recall
     precision = tp_label / max(1, tp_label + fp_label)
@@ -294,6 +309,8 @@ def train_dann_epoch(model, source_loader, target_loader,
         'recall': recall,
         'f1_score': f1_score,
         'domain_accuracy': domain_accuracy,
+        'source_domain_accuracy': source_domain_accuracy,
+        'target_domain_accuracy': target_domain_accuracy,
         'lambda': lambda_p,
         'confusion_matrix': {
             'tp': tp_label,
@@ -324,6 +341,8 @@ def evaluate_dann(model, data_loader, device, domain_name="test"):
     """
     model.eval()
     criterion_label = nn.BCELoss()
+    # Use sum reduction for domain loss to compute a true per-fake mean across the entire loader
+    criterion_domain_sum = nn.BCELoss(reduction='sum')
 
     real_correct = 0
     real_total = 0
@@ -331,7 +350,8 @@ def evaluate_dann(model, data_loader, device, domain_name="test"):
     fake_total = 0
     domain_correct = 0
     domain_total = 0
-    total_loss = 0.0
+    total_label_loss = 0.0
+    total_domain_loss = 0.0  # Will accumulate sum of domain losses over all fake samples
 
     # Confusion matrix for label classification
     tp_label = 0  # True Positive (correctly identified fake)
@@ -354,7 +374,7 @@ def evaluate_dann(model, data_loader, device, domain_name="test"):
 
             # Loss
             loss = criterion_label(label_pred.squeeze(), labels.float())
-            total_loss += loss.item()
+            total_label_loss += loss.item()
 
             # Label predictions
             predicted_labels = (label_pred.squeeze() > 0.5).float()
@@ -384,12 +404,20 @@ def evaluate_dann(model, data_loader, device, domain_name="test"):
                     else:
                         fn_label += 1
 
-            # Domain classification accuracy (only on fakes)
+            # Domain classification accuracy and loss (only on fakes)
             predicted_domains = (domain_pred[fake_mask].squeeze() > 0.5).float()
-            domain_correct += (predicted_domains == domains[fake_mask].float()).sum().item()
+            true_domains = domains[fake_mask].float()
+            domain_correct += (predicted_domains == true_domains).sum().item()
             domain_total += fake_mask.sum().item()
 
-    avg_loss = total_loss / len(data_loader)
+            # Domain loss calculation (sum over fake samples)
+            if fake_mask.sum() > 0:
+                domain_loss = criterion_domain_sum(domain_pred[fake_mask].flatten(), true_domains)
+                total_domain_loss += domain_loss.item()
+
+    avg_loss = total_label_loss / len(data_loader)
+    # Compute per-fake mean domain loss over the entire loader for comparability
+    avg_domain_loss = (total_domain_loss / max(1, domain_total)) if domain_total > 0 else 0.0
     real_acc = 100.0 * real_correct / max(1, real_total)
     fake_acc = 100.0 * fake_correct / max(1, fake_total)
     overall_acc = 100.0 * (real_correct + fake_correct) / max(1, real_total + fake_total)
@@ -402,6 +430,8 @@ def evaluate_dann(model, data_loader, device, domain_name="test"):
 
     return {
         'loss': avg_loss,
+        'domain_loss': avg_domain_loss,
+        'total_loss': avg_loss + avg_domain_loss,
         'real_accuracy': real_acc,
         'fake_accuracy': fake_acc,
         'overall_accuracy': overall_acc,
@@ -419,6 +449,52 @@ def evaluate_dann(model, data_loader, device, domain_name="test"):
         }
     }
 
+
+# Compute validation combined domain loss exactly like train (per-batch sum of means)
+def compute_val_domain_loss_combined(model, source_loader, target_loader, device):
+    model.eval()
+    criterion_domain = nn.BCELoss()
+
+    num_iterations = min(len(source_loader), len(target_loader))
+    total_domain_loss = 0.0
+    with torch.no_grad():
+        source_iter = iter(source_loader)
+        target_iter = iter(target_loader)
+        for _ in range(num_iterations):
+            src_imgs, src_labels, _ = next(source_iter)
+            tgt_imgs, tgt_labels, _ = next(target_iter)
+
+            src_imgs = src_imgs.to(device)
+            src_labels = src_labels.to(device)
+            tgt_imgs = tgt_imgs.to(device)
+            tgt_labels = tgt_labels.to(device)
+
+            src_is_fake = (src_labels == 1).bool()
+            tgt_is_fake = (tgt_labels == 1).bool()
+
+            # Forward with alpha=0 for inference
+            _, src_domain_pred = model(src_imgs, alpha=0.0)
+            _, tgt_domain_pred = model(tgt_imgs, alpha=0.0)
+
+            batch_domain_loss = torch.tensor(0.0, device=device)
+
+            if src_is_fake.sum() > 0:
+                src_fake_pred = src_domain_pred[src_is_fake]
+                src_fake_labels = torch.zeros(src_is_fake.sum(), device=device)
+                batch_domain_loss = batch_domain_loss + criterion_domain(
+                    src_fake_pred.flatten(), src_fake_labels
+                )
+
+            if tgt_is_fake.sum() > 0:
+                tgt_fake_pred = tgt_domain_pred[tgt_is_fake]
+                tgt_fake_labels = torch.ones(tgt_is_fake.sum(), device=device)
+                batch_domain_loss = batch_domain_loss + criterion_domain(
+                    tgt_fake_pred.flatten(), tgt_fake_labels
+                )
+
+            total_domain_loss += batch_domain_loss.item()
+
+    return total_domain_loss / max(1, num_iterations)
 
 # ============================================
 # Main Training Script
@@ -446,7 +522,7 @@ def main():
 
         # Training parameters
         'batch_size': 32,
-        'num_epochs': 20,
+        'num_epochs': 2,
         'learning_rate': 1e-3,
         'target_size': (512, 512),  # Reduced from 512 for speed (4x faster!)
         'sample_size': 200,  # Use None for full dataset
@@ -460,6 +536,7 @@ def main():
 
         # Lambda schedule
         'gamma': 10.0,  # Sharpness of lambda schedule (default 10.0 from DANN paper)
+        'zeta': 1.0,    # Maximum adaptation strength (0-1, default 1.0 for full adaptation)
 
         # Other
         'random_state': 42
@@ -529,13 +606,34 @@ def main():
         target_size=config['target_size']
     )
 
-    # Create evaluation dataset (target domain with eval transform)
+    # Create evaluation datasets using validation data (both source and target domains with eval transform)
+    source_val_data_dir = str(base_path / config['source_name'] / 'CarDD-VAL')
+    source_val_metadata_dir = str(base_path / config['source_name'] / 'CarDD-VAL' / 'metadata')
+
+    target_val_data_dir = str(base_path / config['target_name'] / 'CarDD-VAL')
+    target_val_metadata_dir = str(base_path / config['target_name'] / 'CarDD-VAL' / 'metadata')
+
+    source_eval_dataset = DualDomainDataset(
+        data_dir=source_val_data_dir,
+        metadata_dir=source_val_metadata_dir,
+        domain_id=0,
+        transform=eval_transform,
+        sample_size=config['sample_size']
+    )
+
     target_eval_dataset = DualDomainDataset(
-        data_dir=config['target_data_dir'],
-        metadata_dir=config['target_metadata_dir'],
+        data_dir=target_val_data_dir,
+        metadata_dir=target_val_metadata_dir,
         domain_id=1,
         transform=eval_transform,
         sample_size=config['sample_size']
+    )
+
+    source_eval_loader = create_dataloader(
+        source_eval_dataset,
+        batch_size=config['batch_size'],
+        shuffle=False,
+        target_size=config['target_size']
     )
 
     target_eval_loader = create_dataloader(
@@ -593,14 +691,26 @@ def main():
         'train_recall': [],
         'train_f1_score': [],
         'train_domain_accuracy': [],
-        'target_eval_loss': [],
-        'target_eval_accuracy': [],
-        'target_eval_real_accuracy': [],
-        'target_eval_fake_accuracy': [],
-        'target_eval_precision': [],
-        'target_eval_recall': [],
-        'target_eval_f1_score': [],
-        'target_eval_domain_accuracy': [],
+        'train_source_domain_accuracy': [],
+        'train_target_domain_accuracy': [],
+        'source_val_loss': [],
+        'source_val_domain_loss': [],
+        'source_val_accuracy': [],
+        'source_val_real_accuracy': [],
+        'source_val_fake_accuracy': [],
+        'source_val_precision': [],
+        'source_val_recall': [],
+        'source_val_f1_score': [],
+        'source_val_domain_accuracy': [],
+        'target_val_loss': [],
+        'target_val_domain_loss': [],
+        'target_val_accuracy': [],
+        'target_val_real_accuracy': [],
+        'target_val_fake_accuracy': [],
+        'target_val_precision': [],
+        'target_val_recall': [],
+        'target_val_f1_score': [],
+        'target_val_domain_accuracy': [],
         'lambda_values': [],
         'epoch_train_times': [],
         'epoch_eval_times': []
@@ -621,36 +731,46 @@ def main():
         train_metrics = train_dann_epoch(
             model, source_loader, target_loader,
             criterion_label, criterion_domain,
-            optimizer, device, epoch, config['num_epochs'], config['gamma']
+            optimizer, device, epoch, config['num_epochs'], config, config['gamma'], config['zeta']
         )
         train_time = time.time() - epoch_start_time
 
-        # Evaluate on target domain
+        # Evaluate on both source and target domains
         eval_start_time = time.time()
+        source_metrics = evaluate_dann(model, source_eval_loader, device, domain_name="source")
         target_metrics = evaluate_dann(model, target_eval_loader, device, domain_name="target")
         eval_time = time.time() - eval_start_time
 
-        # Print metrics in symmetric table format
-        print(f"")
-        print(f"{'─'*70}")
-        print(f"{'Metric':<20} {'Train':>12} {'Target':>12} {'Info':>22}")
-        print(f"{'─'*70}")
-        print(f"{'Label Loss':<20} {train_metrics['label_loss']:>12.4f} {target_metrics['loss']:>12.4f}")
-        print(f"{'Domain Loss':<20} {train_metrics['domain_loss']:>12.4f} {'N/A':>12} {'(adversarial)':>12}")
-        print(f"{'Total Loss':<20} {train_metrics['total_loss']:>12.4f} {'N/A':>12}")
-        print(f"{'Label Accuracy':<20} {train_metrics['label_accuracy']:>11.2f}% {target_metrics['overall_accuracy']:>11.2f}%")
-        print(f"{'Precision':<20} {train_metrics['precision']:>12.4f} {target_metrics['precision']:>12.4f}")
-        print(f"{'Recall':<20} {train_metrics['recall']:>12.4f} {target_metrics['recall']:>12.4f}")
-        print(f"{'F1 Score':<20} {train_metrics['f1_score']:>12.4f} {target_metrics['f1_score']:>12.4f}")
-        print(f"{'─'*70}")
+        # Compute combined validation domain loss exactly like training (per-batch sum of means)
+        combined_val_domain_loss = compute_val_domain_loss_combined(
+            model, source_eval_loader, target_eval_loader, device
+        )
 
-        # Domain accuracy (combined - only on fake images)
-        avg_domain_acc = (train_metrics['domain_accuracy'] + target_metrics['domain_accuracy']) / 2
-        domain_status = "✓ Good" if 45 <= avg_domain_acc <= 55 else "⚠ Check"
-        print(f"{'Domain Accuracy':<20} {avg_domain_acc:>11.2f}% {'(fakes only)':>12} {domain_status:>10}")
+        # Cleaned output: labels (source + target) and domains
+        print("")
+        print(f"{'─'*70}")
+        print("LABELS (Source Train vs Source Val vs Target Val)")
+        print(f"{'─'*70}")
+        print(f"{'Metric':<24} {'Src Train':>12} {'Src Val':>12} {'Tgt Val':>12}")
+        print(f"{'Label Loss':<24} {train_metrics['label_loss']:>12.4f} {source_metrics['loss']:>12.4f} {target_metrics['loss']:>12.4f}")
+        print(f"{'Label Accuracy':<24} {train_metrics['label_accuracy']:>11.2f}% {source_metrics['overall_accuracy']:>11.2f}% {target_metrics['overall_accuracy']:>11.2f}%")
+        print(f"{'Precision':<24} {train_metrics['precision']:>12.4f} {source_metrics['precision']:>12.4f} {target_metrics['precision']:>12.4f}")
+        print(f"{'Recall':<24} {train_metrics['recall']:>12.4f} {source_metrics['recall']:>12.4f} {target_metrics['recall']:>12.4f}")
+        print(f"{'F1 Score':<24} {train_metrics['f1_score']:>12.4f} {source_metrics['f1_score']:>12.4f} {target_metrics['f1_score']:>12.4f}")
 
         print(f"{'─'*70}")
-        print(f"Lambda: {train_metrics['lambda']:.4f} | Train: {train_time:.1f}s | Eval: {eval_time:.1f}s | Total: {train_time+eval_time:.1f}s")
+        print("DOMAINS (Domain Classifier)")
+        print(f"{'─'*70}")
+        print(f"{'Domain Loss (combined)':<24} {'Train':>12} {'Val':>12}")
+        print(f"{'':<24} {train_metrics['domain_loss']:>12.4f} {combined_val_domain_loss:>12.4f}")
+        
+        source_domain_status = "✓ Good" if 40 <= source_metrics['domain_accuracy'] <= 60 else "⚠ Check" if source_metrics['domain_accuracy'] > 70 else "⚠ Low"
+        target_domain_status = "✓ Good" if 40 <= target_metrics['domain_accuracy'] <= 60 else "⚠ Check" if target_metrics['domain_accuracy'] > 70 else "⚠ Low"
+        print(f"{'Domain Acc (Source)':<24} {train_metrics['source_domain_accuracy']:>11.2f}% {source_metrics['domain_accuracy']:>11.2f}% {source_domain_status:>10}")
+        print(f"{'Domain Acc (Target)':<24} {train_metrics['target_domain_accuracy']:>11.2f}% {target_metrics['domain_accuracy']:>11.2f}% {target_domain_status:>10}")
+
+        print(f"{'─'*70}")
+        print(f"Lambda: {train_metrics['lambda']:.4f} | LR: {config['learning_rate']:.4f} | Train: {train_time:.1f}s | Eval: {eval_time:.1f}s | Total: {train_time+eval_time:.1f}s")
 
         # Store history
         history['train_label_loss'].append(train_metrics['label_loss'])
@@ -661,14 +781,26 @@ def main():
         history['train_recall'].append(train_metrics['recall'])
         history['train_f1_score'].append(train_metrics['f1_score'])
         history['train_domain_accuracy'].append(train_metrics['domain_accuracy'])
-        history['target_eval_loss'].append(target_metrics['loss'])
-        history['target_eval_accuracy'].append(target_metrics['overall_accuracy'])
-        history['target_eval_real_accuracy'].append(target_metrics['real_accuracy'])
-        history['target_eval_fake_accuracy'].append(target_metrics['fake_accuracy'])
-        history['target_eval_precision'].append(target_metrics['precision'])
-        history['target_eval_recall'].append(target_metrics['recall'])
-        history['target_eval_f1_score'].append(target_metrics['f1_score'])
-        history['target_eval_domain_accuracy'].append(target_metrics['domain_accuracy'])
+        history['train_source_domain_accuracy'].append(train_metrics['source_domain_accuracy'])
+        history['train_target_domain_accuracy'].append(train_metrics['target_domain_accuracy'])
+        history['source_val_loss'].append(source_metrics['loss'])
+        history['source_val_domain_loss'].append(source_metrics['domain_loss'])
+        history['source_val_accuracy'].append(source_metrics['overall_accuracy'])
+        history['source_val_real_accuracy'].append(source_metrics['real_accuracy'])
+        history['source_val_fake_accuracy'].append(source_metrics['fake_accuracy'])
+        history['source_val_precision'].append(source_metrics['precision'])
+        history['source_val_recall'].append(source_metrics['recall'])
+        history['source_val_f1_score'].append(source_metrics['f1_score'])
+        history['source_val_domain_accuracy'].append(source_metrics['domain_accuracy'])
+        history['target_val_loss'].append(target_metrics['loss'])
+        history['target_val_domain_loss'].append(target_metrics['domain_loss'])
+        history['target_val_accuracy'].append(target_metrics['overall_accuracy'])
+        history['target_val_real_accuracy'].append(target_metrics['real_accuracy'])
+        history['target_val_fake_accuracy'].append(target_metrics['fake_accuracy'])
+        history['target_val_precision'].append(target_metrics['precision'])
+        history['target_val_recall'].append(target_metrics['recall'])
+        history['target_val_f1_score'].append(target_metrics['f1_score'])
+        history['target_val_domain_accuracy'].append(target_metrics['domain_accuracy'])
         history['lambda_values'].append(train_metrics['lambda'])
         history['epoch_train_times'].append(train_time)
         history['epoch_eval_times'].append(eval_time)
@@ -719,9 +851,25 @@ def main():
     torch.save(model.state_dict(), final_model_path)
     print(f"Saved final model: {final_model_path}")
 
+    # Ensure all config values have proper defaults and handle None values
+    final_config = config.copy()
+
+    # Handle sample_size: if None, set to actual dataset size or "all"
+    if final_config.get('sample_size') is None:
+        # Get the actual sizes used (both source and target domains)
+        source_size = len(source_dataset)
+        target_size = len(target_dataset)
+        # During training, we use min(source_size, target_size) batches
+        effective_size = min(source_size, target_size)
+        final_config['sample_size'] = f"all (src:{source_size}, tgt:{target_size}, effective:{effective_size})"
+
+    # Ensure gamma and zeta have defaults
+    final_config.setdefault('gamma', 10.0)
+    final_config.setdefault('zeta', 1.0)
+
     # Save metadata
     metadata = {
-        'config': config,
+        'config': final_config,
         'best_epoch': best_epoch,
         'best_target_accuracy': best_target_acc,
         'history': history,
@@ -758,24 +906,22 @@ def main():
         axes[0, 0].legend()
         axes[0, 0].grid(True)
 
-        # Classification metrics curves
-        axes[0, 1].plot(history['train_label_accuracy'], label='Train Label Acc')
-        axes[0, 1].plot(history['target_eval_accuracy'], label='Target Overall Acc')
-        axes[0, 1].plot(history['train_precision'], label='Train Precision')
-        axes[0, 1].plot(history['train_recall'], label='Train Recall')
-        axes[0, 1].plot(history['train_f1_score'], label='Train F1 Score')
-        axes[0, 1].plot(history['target_eval_precision'], label='Target Precision')
-        axes[0, 1].plot(history['target_eval_recall'], label='Target Recall')
-        axes[0, 1].plot(history['target_eval_f1_score'], label='Target F1 Score')
+        # Classification metrics: show ONLY label loss trends for easy comparison
+        axes[0, 1].plot(history['train_label_loss'], label='Source Train Label Loss')
+        axes[0, 1].plot(history['source_val_loss'], label='Source Val Label Loss')
+        axes[0, 1].plot(history['target_val_loss'], label='Target Val Label Loss')
         axes[0, 1].set_xlabel('Epoch')
-        axes[0, 1].set_ylabel('Score')
-        axes[0, 1].set_title('Classification Metrics')
+        axes[0, 1].set_ylabel('Loss')
+        axes[0, 1].set_title('Label Loss (Train vs Source Val vs Target Val)')
         axes[0, 1].legend()
         axes[0, 1].grid(True)
 
         # Domain accuracy
-        axes[1, 0].plot(history['train_domain_accuracy'], label='Train Domain Acc')
-        axes[1, 0].plot(history['target_eval_domain_accuracy'], label='Target Domain Acc')
+        axes[1, 0].plot(history['train_domain_accuracy'], label='Train Combined Acc')
+        axes[1, 0].plot(history['train_source_domain_accuracy'], label='Train Source Acc')
+        axes[1, 0].plot(history['train_target_domain_accuracy'], label='Train Target Acc')
+        axes[1, 0].plot(history['source_val_domain_accuracy'], label='Source Val Domain Acc')
+        axes[1, 0].plot(history['target_val_domain_accuracy'], label='Target Val Domain Acc')
         axes[1, 0].axhline(y=50, color='r', linestyle='--', label='Random (50%)')
         axes[1, 0].set_xlabel('Epoch')
         axes[1, 0].set_ylabel('Domain Accuracy (%)')

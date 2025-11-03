@@ -2,7 +2,7 @@
 # ============================================
 # Monitor Training on EC2
 # ============================================
-# This script shows real-time training progress
+# This script shows real-time training progress for multiple concurrent runs
 
 set -e
 
@@ -40,7 +40,7 @@ fi
 # ============================================
 echo "Checking available training sessions..."
 SESSIONS=$(ssh -i "$EC2_KEY_PATH" "$EC2_SSH_USER@$EC2_PUBLIC_IP" \
-    "screen -list | grep -E '(dann_training|nn_training|sk_training)' || echo ''")
+    "screen -list | grep -E '(dann_training|nn_training|sk_training)' | head -20")
 
 if [ -z "$SESSIONS" ]; then
     echo "⚠️  No training sessions found"
@@ -51,42 +51,52 @@ if [ -z "$SESSIONS" ]; then
 fi
 
 echo "Available training sessions:"
-echo "$SESSIONS"
+echo "$SESSIONS" | nl -v 1
 echo ""
 
-# Count sessions
-SESSION_COUNT=$(echo "$SESSIONS" | wc -l)
+# Count sessions and create array
+SESSION_COUNT=$(echo "$SESSIONS" | wc -l | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+SESSION_ARRAY=()
+while IFS= read -r line; do
+    SESSION_ARRAY+=("$line")
+done <<< "$SESSIONS"
 
 if [ "$SESSION_COUNT" -eq "1" ]; then
     # Only one session, use it automatically
-    SESSION_NAME=$(echo "$SESSIONS" | grep -oE '(dann_training|nn_training|sk_training)' | head -1)
+    SESSION_NAME=$(echo "${SESSION_ARRAY[0]}" | grep -oE '(dann_training|nn_training|sk_training)(_([0-9_]+))?')
     echo "Monitoring session: $SESSION_NAME"
 else
     # Multiple sessions, let user choose
     echo "Select session to monitor:"
-    echo "  [1] dann_training"
-    echo "  [2] nn_training"
-    echo "  [3] sk_training"
+    for i in "${!SESSION_ARRAY[@]}"; do
+        SESSION_ID=$(echo "${SESSION_ARRAY[$i]}" | grep -oE '(dann_training|nn_training|sk_training)(_([0-9_]+))?')
+        echo "  [$((i+1))] $SESSION_ID"
+    done
     echo ""
-    read -p "Choose [1-3]: " -n 1 -r SESSION_CHOICE
+    read -p "Choose [1-$SESSION_COUNT]: " SESSION_CHOICE
     echo ""
 
-    case $SESSION_CHOICE in
-        1) SESSION_NAME="dann_training" ;;
-        2) SESSION_NAME="nn_training" ;;
-        3) SESSION_NAME="sk_training" ;;
-        *)
-            echo "Invalid choice"
-            exit 1
-            ;;
-    esac
+    if ! [[ "$SESSION_CHOICE" =~ ^[0-9]+$ ]] || [ "$SESSION_CHOICE" -lt 1 ] || [ "$SESSION_CHOICE" -gt "$SESSION_COUNT" ]; then
+        echo "Invalid choice"
+        exit 1
+    fi
+
+    SESSION_NAME=$(echo "${SESSION_ARRAY[$((SESSION_CHOICE-1))]}" | grep -oE '(dann_training|nn_training|sk_training)(_([0-9_]+))?')
 fi
 
 # Determine directory and log file based on session
 case $SESSION_NAME in
+    dann_training_*)
+        TRAINING_DIR="domain_adapt"
+        LOG_FILE="training_log_${SESSION_NAME}.txt"
+        ;;
     dann_training)
         TRAINING_DIR="domain_adapt"
         LOG_FILE="training_log_dann_training.txt"
+        ;;
+    nn_training_*|sk_training_*)
+        TRAINING_DIR="simple_detect_car"
+        LOG_FILE="training_log_${SESSION_NAME}.txt"
         ;;
     nn_training|sk_training)
         TRAINING_DIR="simple_detect_car"
@@ -94,7 +104,13 @@ case $SESSION_NAME in
         ;;
 esac
 
-echo "✓ Monitoring: $SESSION_NAME"
+# Verify variables are set
+if [ -z "$TRAINING_DIR" ] || [ -z "$LOG_FILE" ]; then
+    echo "❌ Error: Could not determine directory/log file for session '$SESSION_NAME'"
+    exit 1
+fi
+
+echo "✓ Monitoring: $SESSION_NAME (dir: $TRAINING_DIR, log: $LOG_FILE)"
 echo ""
 
 # ============================================
@@ -106,8 +122,9 @@ echo "  [2] Show last 50 lines"
 echo "  [3] Show GPU status"
 echo "  [4] Show training summary"
 echo "  [5] Attach to screen session (Ctrl+A+D to detach)"
+echo "  [6] Terminate training session"
 echo ""
-read -p "Choose [1-5]: " -n 1 -r CHOICE
+read -p "Choose [1-6]: " -n 1 -r CHOICE
 echo ""
 
 case $CHOICE in
@@ -161,6 +178,52 @@ EOFSUM
         sleep 2
         ssh -t -i "$EC2_KEY_PATH" "$EC2_SSH_USER@$EC2_PUBLIC_IP" \
             "screen -r $SESSION_NAME"
+        ;;
+    6)
+        echo "⚠️  TRAINING TERMINATION OPTIONS"
+        echo "Session: $SESSION_NAME"
+        echo "Directory: $TRAINING_DIR"
+        echo ""
+        echo "Select termination method:"
+        echo "  [1] Interrupt training gracefully (Ctrl+C equivalent)"
+        echo "  [2] Kill entire screen session (force quit)"
+        echo "  [3] Cancel - go back to monitoring menu"
+        echo ""
+        read -p "Choose [1-3]: " -n 1 -r TERM_CHOICE
+        echo ""
+
+        case $TERM_CHOICE in
+            1)
+                echo "🛑 Sending interrupt signal to training process..."
+                echo "This will attempt a graceful shutdown (may take a moment)"
+                ssh -i "$EC2_KEY_PATH" "$EC2_SSH_USER@$EC2_PUBLIC_IP" << EOF
+screen -S $SESSION_NAME -X stuff "^C"
+sleep 2
+echo "Checking if training stopped..."
+ps aux | grep -E "(python|train)" | grep -v grep || echo "No training processes found"
+EOF
+                echo "✅ Interrupt signal sent"
+                ;;
+            2)
+                echo "💀 Force killing screen session: $SESSION_NAME"
+                echo "⚠️  This will immediately terminate all processes in the session"
+                read -p "Are you sure? Type 'yes' to confirm: " CONFIRM
+                if [ "$CONFIRM" = "yes" ]; then
+                    ssh -i "$EC2_KEY_PATH" "$EC2_SSH_USER@$EC2_PUBLIC_IP" \
+                        "screen -S $SESSION_NAME -X quit"
+                    echo "✅ Screen session killed"
+                    echo "💡 Tip: Check screen -list to confirm it's gone"
+                else
+                    echo "❌ Termination cancelled"
+                fi
+                ;;
+            3)
+                echo "↩️  Cancelled - returning to monitoring menu"
+                ;;
+            *)
+                echo "❌ Invalid choice - termination cancelled"
+                ;;
+        esac
         ;;
     *)
         echo "Invalid choice"

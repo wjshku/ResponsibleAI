@@ -59,7 +59,20 @@ rsync -avz \
 echo "✓ requirements.txt synced"
 echo ""
 
-echo "Syncing domain_adapt code..."
+echo "Syncing training scripts (always synced - will overwrite existing)..."
+rsync -avz \
+    --include='train_dann.py' \
+    --include='model_dann.py' \
+    --include='eval_dann.py' \
+    --include='experiments.py' \
+    --exclude='*' \
+    -e "ssh -i \"$EC2_KEY_PATH\"" \
+    domain_adapt/ \
+    "$EC2_SSH_USER@$EC2_PUBLIC_IP":~/ResponsibleAI/domain_adapt/
+echo "✓ Training scripts synced"
+echo ""
+
+echo "Syncing remaining domain_adapt code..."
 rsync -avz --progress \
     --exclude='*.pth' \
     --exclude='*.png' \
@@ -67,11 +80,26 @@ rsync -avz --progress \
     --exclude='__pycache__' \
     --exclude='.git' \
     --exclude='models/' \
+    --exclude='train_dann.py' \
+    --exclude='model_dann.py' \
+    --exclude='eval_dann.py' \
+    --exclude='experiments.py' \
     -e "ssh -i \"$EC2_KEY_PATH\"" \
     domain_adapt/ \
     "$EC2_SSH_USER@$EC2_PUBLIC_IP":~/ResponsibleAI/domain_adapt/
 
 echo "✓ Code synced"
+echo ""
+
+# Sync ec2_scripts
+echo "Syncing EC2 scripts..."
+rsync -avz --progress \
+    --exclude='.git' \
+    -e "ssh -i \"$EC2_KEY_PATH\"" \
+    ec2_scripts/ \
+    "$EC2_SSH_USER@$EC2_PUBLIC_IP":~/ResponsibleAI/ec2_scripts/
+
+echo "✓ EC2 scripts synced"
 echo ""
 
 # Sync simple_detect_car (dependencies)
@@ -349,7 +377,7 @@ echo "======================================================================"
 ssh -i "$EC2_KEY_PATH" "$EC2_SSH_USER@$EC2_PUBLIC_IP" << 'EOF'
 echo "Checking files..."
 
-# Check code files
+# Check training scripts (critical files)
 if [ ! -f ~/ResponsibleAI/domain_adapt/train_dann.py ]; then
     echo "❌ train_dann.py not found"
     exit 1
@@ -360,7 +388,28 @@ if [ ! -f ~/ResponsibleAI/domain_adapt/model_dann.py ]; then
     exit 1
 fi
 
-echo "✓ Code files present"
+if [ ! -f ~/ResponsibleAI/domain_adapt/eval_dann.py ]; then
+    echo "❌ eval_dann.py not found"
+    exit 1
+fi
+
+if [ ! -f ~/ResponsibleAI/domain_adapt/experiments.py ]; then
+    echo "❌ experiments.py not found"
+    exit 1
+fi
+
+# Check EC2 scripts
+if [ ! -f ~/ResponsibleAI/ec2_scripts/train_on_ec2.sh ]; then
+    echo "❌ train_on_ec2.sh not found"
+    exit 1
+fi
+
+if [ ! -f ~/ResponsibleAI/ec2_scripts/monitor_training.sh ]; then
+    echo "❌ monitor_training.sh not found"
+    exit 1
+fi
+
+echo "✓ Code and script files present"
 echo ""
 
 # Check original CarDD data
