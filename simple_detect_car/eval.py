@@ -16,7 +16,7 @@ from datetime import datetime
 import torch
 import torch.nn as nn
 
-from data_loader import CarScratchDataset, create_dataloader, get_eval_transforms
+from data_loader import CarScratchDataset, create_dataloader, combine_datasets, get_eval_transforms
 from models import get_model
 from utils import plot_losses
 
@@ -84,12 +84,35 @@ def main():
         max_list = int(input("How many recent runs to list? [30]: ").strip() or "30")
     except Exception:
         max_list = 30
-    img2img_type, data_type = "SD2", "CarDD-TE"
-    base_dir = f"/Users/wjs/Library/CloudStorage/OneDrive-Personal/Coding, ML & DL/ResponsibleAI/cardd_data/GenAI_Results/{img2img_type}/{data_type}"
-    data_dir = input(f"Data directory [{base_dir}]: ").strip() or \
-        base_dir
-    metadata_dir = input(f"Metadata directory [{base_dir}/metadata]: ").strip() or \
-        f"{base_dir}/metadata"
+    # Choose test domains
+    print("\nSelect test domains:")
+    print("  [1] SD2 only")
+    print("  [2] Kontext only")
+    print("  [3] SD2 + Kontext (combined)")
+    test_domain_choice = input("Enter choice [1-3] (default: 1): ").strip() or "1"
+    
+    if test_domain_choice == "1":
+        test_domains = ["SD2"]
+    elif test_domain_choice == "2":
+        test_domains = ["Kontext"]
+    elif test_domain_choice == "3":
+        test_domains = ["SD2", "Kontext"]
+    else:
+        print("Invalid choice, defaulting to SD2 only")
+        test_domains = ["SD2"]
+    
+    print(f"\nTesting on: {', '.join(test_domains)}")
+    
+    # Choose test split
+    print("\nSelect test split:")
+    print("  [1] CarDD-VAL")
+    print("  [2] CarDD-TE")
+    test_split_choice = input("Enter choice [1-2] (default: 2): ").strip() or "2"
+    test_data_type = "CarDD-VAL" if test_split_choice == "1" else "CarDD-TE"
+    
+    # Set up paths
+    script_dir = Path(__file__).parent
+    genai_root = script_dir.parent / "cardd_data" / "GenAI_Results"
     try:
         batch_size = int(input("Batch size [32]: ").strip() or "32")
     except Exception:
@@ -210,15 +233,42 @@ def main():
     else:
         chosen_target_size = meta_target_size
 
-    # Build eval dataset/loader
+    # Build eval datasets/loader from selected domains
     eval_transform = get_eval_transforms(target_size=chosen_target_size)
-    dataset = CarScratchDataset.load_binary_dataset(
-        data_dir=data_dir,
-        metadata_dir=metadata_dir,
-        sample_size=None,
-        shuffle=False,
-        transform=eval_transform,
-    )
+    test_datasets = []
+    
+    for domain in test_domains:
+        test_dir = genai_root / domain / test_data_type
+        test_data_dir = str(test_dir)
+        test_metadata_dir = str(test_dir / "metadata")
+        
+        if not Path(test_data_dir).exists():
+            print(f"Warning: Test directory {test_data_dir} does not exist, skipping {domain}")
+            continue
+        
+        print(f"  Loading {domain} {test_data_type}...")
+        ds = CarScratchDataset.load_binary_dataset(
+            data_dir=test_data_dir,
+            metadata_dir=test_metadata_dir,
+            sample_size=None,
+            shuffle=False,
+            transform=eval_transform,
+        )
+        test_datasets.append(ds)
+        print(f"    Loaded {len(ds)} samples from {domain}")
+    
+    if not test_datasets:
+        print("Error: No test datasets loaded!")
+        return
+    
+    # Combine datasets if multiple domains
+    if len(test_datasets) > 1:
+        print(f"\nCombining {len(test_datasets)} test datasets...")
+        dataset = combine_datasets(test_datasets)
+        print(f"Combined test dataset size: {len(dataset)}")
+    else:
+        dataset = test_datasets[0]
+    
     loader = create_dataloader(dataset, batch_size=batch_size, shuffle=False, target_size=chosen_target_size)
 
     # Reconstruct model

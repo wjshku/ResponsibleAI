@@ -33,10 +33,11 @@ echo ""
 # ============================================
 echo "Select training type:"
 echo "  [1] DANN - Domain Adversarial Neural Network (domain_adapt)"
-echo "  [2] Simple Detect - CNN/MLP for binary classification (simple_detect_car)"
-echo "  [3] Simple Detect - Scikit-learn models (simple_detect_car)"
+echo "  [2] MNIST DANN - MNIST/MNIST-M domain adaptation (domain_adapt)"
+echo "  [3] Simple Detect - CNN/MLP for binary classification (simple_detect_car)"
+echo "  [4] Simple Detect - Scikit-learn models (simple_detect_car)"
 echo ""
-read -p "Choose [1-3]: " -n 1 -r TRAINING_TYPE
+read -p "Choose [1-4]: " -n 1 -r TRAINING_TYPE
 echo ""
 
 case $TRAINING_TYPE in
@@ -46,11 +47,16 @@ case $TRAINING_TYPE in
         SESSION_NAME="dann_training_$(date +%Y%m%d_%H%M%S)"
         ;;
     2)
+        TRAINING_DIR="domain_adapt"
+        TRAINING_SCRIPT="mnist_dann.py"
+        SESSION_NAME="mnist_dann_training_$(date +%Y%m%d_%H%M%S)"
+        ;;
+    3)
         TRAINING_DIR="simple_detect_car"
         TRAINING_SCRIPT="train_nn.py"
         SESSION_NAME="nn_training_$(date +%Y%m%d_%H%M%S)"
         ;;
-    3)
+    4)
         TRAINING_DIR="simple_detect_car"
         TRAINING_SCRIPT="train_sk.py"
         SESSION_NAME="sk_training_$(date +%Y%m%d_%H%M%S)"
@@ -74,6 +80,17 @@ if [ "$TRAINING_TYPE" == "1" ]; then
     echo "  [2] Medium (sample_size=3000, epochs=30) - ~2 hours"
     echo "  [3] Full training (all data, epochs=50) - ~4-6 hours"
     echo "  [4] Production (all data, epochs=100) - ~8-10 hours"
+    echo "  [5] Custom"
+    echo ""
+    read -p "Choose [1-5]: " -n 1 -r CONFIG_CHOICE
+    echo ""
+elif [ "$TRAINING_TYPE" == "2" ]; then
+    # MNIST DANN configuration
+    echo "Select MNIST DANN training configuration:"
+    echo "  [1] Quick test (epochs=5) - ~15 min"
+    echo "  [2] Medium (epochs=20) - ~1 hour"
+    echo "  [3] Full training (epochs=50) - ~2-3 hours"
+    echo "  [4] Production (epochs=100) - ~4-5 hours"
     echo "  [5] Custom"
     echo ""
     read -p "Choose [1-5]: " -n 1 -r CONFIG_CHOICE
@@ -160,6 +177,55 @@ if [ "$TRAINING_TYPE" == "1" ]; then
     echo "  Gamma (lambda schedule): $GAMMA"
     echo "  Zeta (max adaptation): $ZETA"
     echo ""
+elif [ "$TRAINING_TYPE" == "2" ]; then
+    # MNIST DANN configuration
+    case $CONFIG_CHOICE in
+        1)
+            NUM_EPOCHS=5
+            BATCH_SIZE=128
+            LEARNING_RATE=0.001
+            ZETA=1.0
+            ;;
+        2)
+            NUM_EPOCHS=20
+            BATCH_SIZE=128
+            LEARNING_RATE=0.001
+            ZETA=1.0
+            ;;
+        3)
+            NUM_EPOCHS=50
+            BATCH_SIZE=128
+            LEARNING_RATE=0.001
+            ZETA=1.0
+            ;;
+        4)
+            NUM_EPOCHS=100
+            BATCH_SIZE=128
+            LEARNING_RATE=0.001
+            ZETA=1.0
+            ;;
+        5)
+            read -p "Number of epochs: " NUM_EPOCHS
+            read -p "Batch size (default 128): " BATCH_SIZE
+            BATCH_SIZE=${BATCH_SIZE:-128}
+            read -p "Learning rate (default 0.001): " LEARNING_RATE
+            LEARNING_RATE=${LEARNING_RATE:-0.001}
+            read -p "Zeta (adaptation strength, default 1.0, try 2.0-3.0): " ZETA
+            ZETA=${ZETA:-1.0}
+            ;;
+        *)
+            echo "Invalid choice"
+            exit 1
+            ;;
+    esac
+
+    echo ""
+    echo "MNIST DANN Training configuration:"
+    echo "  Epochs: $NUM_EPOCHS"
+    echo "  Batch size: $BATCH_SIZE"
+    echo "  Learning rate: $LEARNING_RATE"
+    echo "  Zeta (adaptation strength): $ZETA"
+    echo ""
 else
     # Simple Detect configuration
     case $CONFIG_CHOICE in
@@ -212,7 +278,7 @@ fi
 # Test connection
 # ============================================
 echo "Testing connection..."
-if ! ssh -o ConnectTimeout=5 -i "$EC2_KEY_PATH" "$EC2_SSH_USER@$EC2_PUBLIC_IP" "exit" 2>/dev/null; then
+if ! ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -i "$EC2_KEY_PATH" "$EC2_SSH_USER@$EC2_PUBLIC_IP" "exit" 2>/dev/null; then
     echo "❌ Cannot connect to EC2 instance"
     exit 1
 fi
@@ -223,7 +289,7 @@ echo ""
 # Verify GPU
 # ============================================
 echo "Verifying GPU..."
-GPU_INFO=$(ssh -i "$EC2_KEY_PATH" "$EC2_SSH_USER@$EC2_PUBLIC_IP" "nvidia-smi --query-gpu=name --format=csv,noheader" 2>/dev/null || echo "No GPU")
+GPU_INFO=$(ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -i "$EC2_KEY_PATH" "$EC2_SSH_USER@$EC2_PUBLIC_IP" "nvidia-smi --query-gpu=name --format=csv,noheader" 2>/dev/null || echo "No GPU")
 echo "✓ GPU: $GPU_INFO"
 echo ""
 
@@ -234,7 +300,7 @@ echo "Updating training configuration..."
 
 if [ "$TRAINING_TYPE" == "1" ]; then
     # Update DANN script
-    ssh -i "$EC2_KEY_PATH" "$EC2_SSH_USER@$EC2_PUBLIC_IP" << EOF
+    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -i "$EC2_KEY_PATH" "$EC2_SSH_USER@$EC2_PUBLIC_IP" << EOF
 cd ~/ResponsibleAI/domain_adapt
 
 python3 << PYTHON_EOF
@@ -250,7 +316,7 @@ content = re.sub(
     content
 )
 content = re.sub(
-    r"'learning_rate': [^,]+,",
+    r"'learning_rate': 1e-3,",
     "'learning_rate': $LEARNING_RATE,",
     content
 )
@@ -291,9 +357,77 @@ with open('train_dann.py', 'w') as f:
 print("✓ DANN configuration updated")
 PYTHON_EOF
 EOF
+elif [ "$TRAINING_TYPE" == "2" ]; then
+    # Update MNIST DANN script
+    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -i "$EC2_KEY_PATH" "$EC2_SSH_USER@$EC2_PUBLIC_IP" << EOF
+cd ~/ResponsibleAI/domain_adapt
+
+# Export variables for python script
+export BATCH_SIZE="$BATCH_SIZE"
+export NUM_EPOCHS="$NUM_EPOCHS"
+export LEARNING_RATE="$LEARNING_RATE"
+export ZETA="$ZETA"
+
+python3 << PYTHON_EOF
+import re
+import os
+
+with open('mnist_dann.py', 'r') as f:
+    content = f.read()
+
+# Update batch_size (handle both ternary and simple formats)
+batch_size = os.environ['BATCH_SIZE']
+content = re.sub(
+    r"'batch_size': \d+ if quick_test else \d+,",
+    f"'batch_size': {batch_size} if quick_test else {batch_size},",
+    content
+)
+# Also handle simple format
+content = re.sub(
+    r"'batch_size': \d+,",
+    f"'batch_size': {batch_size},",
+    content
+)
+
+# Update num_epochs (handle both ternary and simple formats)
+num_epochs = os.environ['NUM_EPOCHS']
+content = re.sub(
+    r"'num_epochs': \d+ if quick_test else \d+,",
+    f"'num_epochs': {num_epochs} if quick_test else {num_epochs},",
+    content
+)
+# Also handle simple format
+content = re.sub(
+    r"'num_epochs': \d+,",
+    f"'num_epochs': {num_epochs},",
+    content
+)
+
+# Update learning_rate
+learning_rate = os.environ['LEARNING_RATE']
+content = re.sub(
+    r"'learning_rate': [\de\.\-]+,",
+    f"'learning_rate': {learning_rate},",
+    content
+)
+
+# Update zeta
+zeta = os.environ['ZETA']
+content = re.sub(
+    r"'zeta': [\d.]+,",
+    f"'zeta': {zeta},",
+    content
+)
+
+with open('mnist_dann.py', 'w') as f:
+    f.write(content)
+
+print("✓ MNIST DANN configuration updated")
+PYTHON_EOF
+EOF
 else
     # Update simple_detect_car script
-    ssh -i "$EC2_KEY_PATH" "$EC2_SSH_USER@$EC2_PUBLIC_IP" << EOF
+    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -i "$EC2_KEY_PATH" "$EC2_SSH_USER@$EC2_PUBLIC_IP" << EOF
 cd ~/ResponsibleAI/simple_detect_car
 
 python3 << 'PYTHON_EOF'
@@ -355,7 +489,7 @@ echo "======================================================================"
 echo "CHECKING DEPENDENCIES"
 echo "======================================================================"
 
-ssh -i "$EC2_KEY_PATH" "$EC2_SSH_USER@$EC2_PUBLIC_IP" << 'EOF'
+ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -i "$EC2_KEY_PATH" "$EC2_SSH_USER@$EC2_PUBLIC_IP" << 'EOF'
 # Check disk space
 echo "Checking disk space..."
 df -h / | tail -1
@@ -462,7 +596,7 @@ if [[ ! $REPLY =~ ^[Yy]$ ]]; then
 fi
 
 # Start training in screen session
-ssh -i "$EC2_KEY_PATH" "$EC2_SSH_USER@$EC2_PUBLIC_IP" << EOFSCREEN
+ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -i "$EC2_KEY_PATH" "$EC2_SSH_USER@$EC2_PUBLIC_IP" << EOFSCREEN
 cd ~/ResponsibleAI/$TRAINING_DIR
 
 # Install screen if not available
@@ -536,7 +670,7 @@ echo "======================================================================"
 echo "Waiting for training to start..."
 sleep 3
 
-ssh -i "$EC2_KEY_PATH" "$EC2_SSH_USER@$EC2_PUBLIC_IP" << EOFMONITOR
+ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -i "$EC2_KEY_PATH" "$EC2_SSH_USER@$EC2_PUBLIC_IP" << EOFMONITOR
 cd ~/ResponsibleAI/$TRAINING_DIR
 
 # Wait for log file to appear (up to 10 seconds)
@@ -594,6 +728,14 @@ if [ "$TRAINING_TYPE" == "1" ]; then
         2) echo "  ~2 hours" ;;
         3) echo "  ~4-6 hours" ;;
         4) echo "  ~8-10 hours" ;;
+    esac
+elif [ "$TRAINING_TYPE" == "2" ]; then
+    echo "Estimated completion:"
+    case $CONFIG_CHOICE in
+        1) echo "  ~15 minutes" ;;
+        2) echo "  ~1 hour" ;;
+        3) echo "  ~2-3 hours" ;;
+        4) echo "  ~4-5 hours" ;;
     esac
 else
     echo "Estimated completion:"

@@ -53,20 +53,21 @@ cd "$SCRIPT_DIR/.."
 # Sync requirements.txt first
 echo "Syncing requirements.txt..."
 rsync -avz \
-    -e "ssh -i \"$EC2_KEY_PATH\"" \
-    requirements.txt \
-    "$EC2_SSH_USER@$EC2_PUBLIC_IP":~/ResponsibleAI/
+    -e "ssh -i \"$EC2_KEY_PATH\" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR" \
+    ec2_scripts/requirements.txt \
+    "$EC2_SSH_USER@$EC2_PUBLIC_IP":~/ResponsibleAI/ec2_scripts/
 echo "✓ requirements.txt synced"
 echo ""
 
 echo "Syncing training scripts (always synced - will overwrite existing)..."
 rsync -avz \
     --include='train_dann.py' \
+    --include='mnist_dann.py' \
     --include='model_dann.py' \
     --include='eval_dann.py' \
     --include='experiments.py' \
     --exclude='*' \
-    -e "ssh -i \"$EC2_KEY_PATH\"" \
+    -e "ssh -i \"$EC2_KEY_PATH\" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR" \
     domain_adapt/ \
     "$EC2_SSH_USER@$EC2_PUBLIC_IP":~/ResponsibleAI/domain_adapt/
 echo "✓ Training scripts synced"
@@ -81,10 +82,11 @@ rsync -avz --progress \
     --exclude='.git' \
     --exclude='models/' \
     --exclude='train_dann.py' \
+    --exclude='mnist_dann.py' \
     --exclude='model_dann.py' \
     --exclude='eval_dann.py' \
     --exclude='experiments.py' \
-    -e "ssh -i \"$EC2_KEY_PATH\"" \
+    -e "ssh -i \"$EC2_KEY_PATH\" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR" \
     domain_adapt/ \
     "$EC2_SSH_USER@$EC2_PUBLIC_IP":~/ResponsibleAI/domain_adapt/
 
@@ -95,7 +97,7 @@ echo ""
 echo "Syncing EC2 scripts..."
 rsync -avz --progress \
     --exclude='.git' \
-    -e "ssh -i \"$EC2_KEY_PATH\"" \
+    -e "ssh -i \"$EC2_KEY_PATH\" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR" \
     ec2_scripts/ \
     "$EC2_SSH_USER@$EC2_PUBLIC_IP":~/ResponsibleAI/ec2_scripts/
 
@@ -109,7 +111,7 @@ rsync -avz --progress \
     --exclude='__pycache__' \
     --exclude='.git' \
     --exclude='models/' \
-    -e "ssh -i \"$EC2_KEY_PATH\"" \
+    -e "ssh -i \"$EC2_KEY_PATH\" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR" \
     simple_detect_car/*.py \
     "$EC2_SSH_USER@$EC2_PUBLIC_IP":~/ResponsibleAI/simple_detect_car/
 
@@ -126,19 +128,20 @@ echo ""
 
 # Ensure directories exist on EC2
 echo "Creating directory structure on EC2..."
-ssh -i "$EC2_KEY_PATH" "$EC2_SSH_USER@$EC2_PUBLIC_IP" << 'EOFMKDIR'
+ssh -i "$EC2_KEY_PATH" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$EC2_SSH_USER@$EC2_PUBLIC_IP" << 'EOFMKDIR'
 mkdir -p ~/ResponsibleAI/cardd_data/GenAI_Results/SD2/CarDD-{TE,TR,VAL}
 mkdir -p ~/ResponsibleAI/cardd_data/GenAI_Results/Kontext/CarDD-{TE,TR,VAL}
 mkdir -p ~/ResponsibleAI/CarDD_release/CarDD_SOD/CarDD-TE/CarDD-TE-{Image,Mask}
 mkdir -p ~/ResponsibleAI/CarDD_release/CarDD_SOD/CarDD-TR/CarDD-TR-{Image,Mask}
 mkdir -p ~/ResponsibleAI/CarDD_release/CarDD_SOD/CarDD-VAL/CarDD-VAL-{Image,Mask}
+mkdir -p ~/ResponsibleAI/domain_adapt/data/mnist_m
 EOFMKDIR
 echo "✓ Directories created"
 echo ""
 
 # Check if data already synced
 echo "Checking existing data on EC2..."
-DATA_STATUS=$(ssh -i "$EC2_KEY_PATH" "$EC2_SSH_USER@$EC2_PUBLIC_IP" << 'EOFCHECK'
+DATA_STATUS=$(ssh -i "$EC2_KEY_PATH" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$EC2_SSH_USER@$EC2_PUBLIC_IP" << 'EOFCHECK'
 ORIG_IMGS=$(find ~/ResponsibleAI/CarDD_release/CarDD_SOD -type f \( -name "*.jpg" -o -name "*.png" \) -path "*/Image/*" 2>/dev/null | wc -l)
 MASKS=$(find ~/ResponsibleAI/CarDD_release/CarDD_SOD -type f -path "*/Mask/*" 2>/dev/null | wc -l)
 SD2_JSON=$(find ~/ResponsibleAI/cardd_data/GenAI_Results/SD2 -name "*.json" 2>/dev/null | wc -l)
@@ -193,7 +196,7 @@ if [ "$DATA_SYNC_SKIPPED" != "true" ]; then
             --include="*/" \
             --include="*.json" \
             --exclude="*" \
-            -e "ssh -i \"$EC2_KEY_PATH\"" \
+            -e "ssh -i \"$EC2_KEY_PATH\" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR" \
             cardd_data/GenAI_Results/SD2/ \
             "$EC2_SSH_USER@$EC2_PUBLIC_IP":~/ResponsibleAI/cardd_data/GenAI_Results/SD2/
         echo "✓ SD2 metadata synced"
@@ -204,7 +207,7 @@ if [ "$DATA_SYNC_SKIPPED" != "true" ]; then
             --include="*/" \
             --include="*.json" \
             --exclude="*" \
-            -e "ssh -i \"$EC2_KEY_PATH\"" \
+            -e "ssh -i \"$EC2_KEY_PATH\" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR" \
             cardd_data/GenAI_Results/Kontext/ \
             "$EC2_SSH_USER@$EC2_PUBLIC_IP":~/ResponsibleAI/cardd_data/GenAI_Results/Kontext/
         echo "✓ Kontext metadata synced"
@@ -234,56 +237,119 @@ if [ "$DATA_SYNC_SKIPPED" != "true" ]; then
 
     if [ "$ORIGINAL_SKIP" != "true" ]; then
         echo "Syncing CarDD-TE images (374 JPG files)..."
-        rsync -avz --progress \
-            -e "ssh -i \"$EC2_KEY_PATH\"" \
+rsync -avz --progress \
+    -e "ssh -i \"$EC2_KEY_PATH\" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR" \
             "/Users/wjs/Local Storage/CarDD_release/CarDD_SOD/CarDD-TE/CarDD-TE-Image/" \
             "$EC2_SSH_USER@$EC2_PUBLIC_IP":~/ResponsibleAI/CarDD_release/CarDD_SOD/CarDD-TE/CarDD-TE-Image/
         echo "✓ CarDD-TE images synced"
         echo ""
 
         echo "Syncing CarDD-TE masks (374 PNG files)..."
-        rsync -avz --progress \
-            -e "ssh -i \"$EC2_KEY_PATH\"" \
+rsync -avz --progress \
+    -e "ssh -i \"$EC2_KEY_PATH\" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR" \
             "/Users/wjs/Local Storage/CarDD_release/CarDD_SOD/CarDD-TE/CarDD-TE-Mask/" \
             "$EC2_SSH_USER@$EC2_PUBLIC_IP":~/ResponsibleAI/CarDD_release/CarDD_SOD/CarDD-TE/CarDD-TE-Mask/
         echo "✓ CarDD-TE masks synced"
         echo ""
 
         echo "Syncing CarDD-TR images (2,826 JPG files)..."
-        rsync -avz --progress \
-            -e "ssh -i \"$EC2_KEY_PATH\"" \
+rsync -avz --progress \
+    -e "ssh -i \"$EC2_KEY_PATH\" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR" \
             "/Users/wjs/Local Storage/CarDD_release/CarDD_SOD/CarDD-TR/CarDD-TR-Image/" \
             "$EC2_SSH_USER@$EC2_PUBLIC_IP":~/ResponsibleAI/CarDD_release/CarDD_SOD/CarDD-TR/CarDD-TR-Image/
         echo "✓ CarDD-TR images synced"
         echo ""
 
         echo "Syncing CarDD-TR masks (2,826 PNG files)..."
-        rsync -avz --progress \
-            -e "ssh -i \"$EC2_KEY_PATH\"" \
+rsync -avz --progress \
+    -e "ssh -i \"$EC2_KEY_PATH\" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR" \
             "/Users/wjs/Local Storage/CarDD_release/CarDD_SOD/CarDD-TR/CarDD-TR-Mask/" \
             "$EC2_SSH_USER@$EC2_PUBLIC_IP":~/ResponsibleAI/CarDD_release/CarDD_SOD/CarDD-TR/CarDD-TR-Mask/
         echo "✓ CarDD-TR masks synced"
         echo ""
 
         echo "Syncing CarDD-VAL images (810 JPG files)..."
-        rsync -avz --progress \
-            -e "ssh -i \"$EC2_KEY_PATH\"" \
+rsync -avz --progress \
+    -e "ssh -i \"$EC2_KEY_PATH\" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR" \
             "/Users/wjs/Local Storage/CarDD_release/CarDD_SOD/CarDD-VAL/CarDD-VAL-Image/" \
             "$EC2_SSH_USER@$EC2_PUBLIC_IP":~/ResponsibleAI/CarDD_release/CarDD_SOD/CarDD-VAL/CarDD-VAL-Image/
         echo "✓ CarDD-VAL images synced"
         echo ""
 
         echo "Syncing CarDD-VAL masks (810 PNG files)..."
-        rsync -avz --progress \
-            -e "ssh -i \"$EC2_KEY_PATH\"" \
+rsync -avz --progress \
+    -e "ssh -i \"$EC2_KEY_PATH\" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR" \
             "/Users/wjs/Local Storage/CarDD_release/CarDD_SOD/CarDD-VAL/CarDD-VAL-Mask/" \
             "$EC2_SSH_USER@$EC2_PUBLIC_IP":~/ResponsibleAI/CarDD_release/CarDD_SOD/CarDD-VAL/CarDD-VAL-Mask/
         echo "✓ CarDD-VAL masks synced"
         echo ""
     else
-        echo "✓ Original data sync skipped"
-        echo ""
+    echo "✓ Original data sync skipped"
+    echo ""
     fi
+
+# ============================================
+# Sync MNIST-M data (for MNIST DANN training)
+# ============================================
+echo "======================================================================"
+echo "STEP 2.5: SYNCING MNIST-M DATA"
+echo "======================================================================"
+
+# Check if MNIST-M data exists locally
+if [ -d "domain_adapt/data/mnist_m" ] || [ -d "data/mnist_m" ]; then
+    MNIST_M_LOCAL=""
+    if [ -d "domain_adapt/data/mnist_m" ]; then
+        MNIST_M_LOCAL="domain_adapt/data/mnist_m"
+    elif [ -d "data/mnist_m" ]; then
+        MNIST_M_LOCAL="data/mnist_m"
+    fi
+
+    echo "Checking existing MNIST-M data on EC2..."
+    MNIST_M_STATUS=$(ssh -i "$EC2_KEY_PATH" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$EC2_SSH_USER@$EC2_PUBLIC_IP" << 'MNIST_EOF'
+TRAIN_IMGS=$(find ~/ResponsibleAI/domain_adapt/data/mnist_m -path "*/mnist_m_train/*" -type f 2>/dev/null | wc -l)
+TEST_IMGS=$(find ~/ResponsibleAI/domain_adapt/data/mnist_m -path "*/mnist_m_test/*" -type f 2>/dev/null | wc -l)
+TRAIN_LABELS=$(find ~/ResponsibleAI/domain_adapt/data/mnist_m -name "mnist_m_train_labels.txt" 2>/dev/null | wc -l)
+TEST_LABELS=$(find ~/ResponsibleAI/domain_adapt/data/mnist_m -name "mnist_m_test_labels.txt" 2>/dev/null | wc -l)
+echo "$TRAIN_IMGS $TEST_IMGS $TRAIN_LABELS $TEST_LABELS"
+MNIST_EOF
+    )
+
+    read -r TRAIN_IMG_COUNT TEST_IMG_COUNT TRAIN_LABEL_COUNT TEST_LABEL_COUNT <<< "$MNIST_M_STATUS"
+
+    echo "Current MNIST-M data on EC2:"
+    echo "  Train images: $TRAIN_IMG_COUNT"
+    echo "  Test images: $TEST_IMG_COUNT"
+    echo "  Train labels: $TRAIN_LABEL_COUNT"
+    echo "  Test labels: $TEST_LABEL_COUNT"
+    echo ""
+
+    if [ "$TRAIN_IMG_COUNT" -gt "50000" ] && [ "$TEST_IMG_COUNT" -gt "8000" ] && [ "$TRAIN_LABEL_COUNT" -eq "1" ] && [ "$TEST_LABEL_COUNT" -eq "1" ]; then
+        echo "MNIST-M data appears to be synced"
+        read -p "Re-sync MNIST-M data? (y/n) " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            echo "Skipping MNIST-M data sync"
+            MNIST_M_SYNC_SKIPPED=true
+        fi
+    fi
+
+    if [ "$MNIST_M_SYNC_SKIPPED" != "true" ]; then
+        echo "Syncing MNIST-M data..."
+        rsync -avz --timeout=300 --compress --partial \
+            -e "ssh -i \"$EC2_KEY_PATH\" -o ServerAliveInterval=60 -o ServerAliveCountMax=10" \
+            "$MNIST_M_LOCAL/" \
+            "$EC2_SSH_USER@$EC2_PUBLIC_IP":~/ResponsibleAI/domain_adapt/data/mnist_m/
+        echo "✓ MNIST-M data synced"
+    else
+        echo "✓ MNIST-M data sync skipped"
+    fi
+else
+    echo "⚠️  MNIST-M data not found locally"
+    echo "   Expected location: domain_adapt/data/mnist_m"
+    echo "   MNIST-M data will be downloaded automatically by mnist_dann.py"
+    echo "   (MNIST dataset downloads automatically via torchvision)"
+fi
+echo ""
 
     echo "======================================================================"
     echo "STEP 3: Syncing processed/fake images"
@@ -305,24 +371,24 @@ if [ "$DATA_SYNC_SKIPPED" != "true" ]; then
 
     if [ "$PROCESSED_SKIP" != "true" ]; then
         echo "Syncing SD2 images (~4,375 PNG files: 374 TE + 3,187 TR + 814 VAL)..."
-        rsync -avz --progress \
+        rsync -avz --timeout=300 --compress --partial \
             --include="*/" \
             --include="*.png" \
             --include="*.jpg" \
             --exclude="*" \
-            -e "ssh -i \"$EC2_KEY_PATH\"" \
+            -e "ssh -i \"$EC2_KEY_PATH\" -o ServerAliveInterval=60 -o ServerAliveCountMax=10" \
             cardd_data/GenAI_Results/SD2/ \
             "$EC2_SSH_USER@$EC2_PUBLIC_IP":~/ResponsibleAI/cardd_data/GenAI_Results/SD2/
         echo "✓ SD2 images synced"
         echo ""
 
         echo "Syncing Kontext images (~4,000 PNG files: 374 TE + 2,816 TR + 810 VAL)..."
-        rsync -avz --progress \
+        rsync -avz --timeout=300 --compress --partial \
             --include="*/" \
             --include="*.png" \
             --include="*.jpg" \
             --exclude="*" \
-            -e "ssh -i \"$EC2_KEY_PATH\"" \
+            -e "ssh -i \"$EC2_KEY_PATH\" -o ServerAliveInterval=60 -o ServerAliveCountMax=10" \
             cardd_data/GenAI_Results/Kontext/ \
             "$EC2_SSH_USER@$EC2_PUBLIC_IP":~/ResponsibleAI/cardd_data/GenAI_Results/Kontext/
         echo "✓ Kontext images synced"
@@ -343,7 +409,7 @@ echo "======================================================================"
 echo "UPDATING FILE PATHS"
 echo "======================================================================"
 
-ssh -i "$EC2_KEY_PATH" "$EC2_SSH_USER@$EC2_PUBLIC_IP" << 'EOF'
+ssh -i "$EC2_KEY_PATH" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$EC2_SSH_USER@$EC2_PUBLIC_IP" << 'EOF'
 cd ~/ResponsibleAI/domain_adapt
 
 echo "✓ Code uses relative paths, no path updates needed"
@@ -374,7 +440,7 @@ echo "======================================================================"
 echo "VERIFYING SYNC"
 echo "======================================================================"
 
-ssh -i "$EC2_KEY_PATH" "$EC2_SSH_USER@$EC2_PUBLIC_IP" << 'EOF'
+ssh -i "$EC2_KEY_PATH" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$EC2_SSH_USER@$EC2_PUBLIC_IP" << 'EOF'
 echo "Checking files..."
 
 # Check training scripts (critical files)
@@ -465,6 +531,7 @@ fi
 EOF
 
 echo ""
+
 
 # ============================================
 # Success message

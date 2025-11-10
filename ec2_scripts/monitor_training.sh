@@ -63,13 +63,13 @@ done <<< "$SESSIONS"
 
 if [ "$SESSION_COUNT" -eq "1" ]; then
     # Only one session, use it automatically
-    SESSION_NAME=$(echo "${SESSION_ARRAY[0]}" | grep -oE '(dann_training|nn_training|sk_training)(_([0-9_]+))?')
+    SESSION_NAME=$(echo "${SESSION_ARRAY[0]}" | grep -oE '(mnist_dann_training|dann_training|nn_training|sk_training)(_([0-9_]+))?')
     echo "Monitoring session: $SESSION_NAME"
 else
     # Multiple sessions, let user choose
     echo "Select session to monitor:"
     for i in "${!SESSION_ARRAY[@]}"; do
-        SESSION_ID=$(echo "${SESSION_ARRAY[$i]}" | grep -oE '(dann_training|nn_training|sk_training)(_([0-9_]+))?')
+        SESSION_ID=$(echo "${SESSION_ARRAY[$i]}" | grep -oE '(mnist_dann_training|dann_training|nn_training|sk_training)(_([0-9_]+))?')
         echo "  [$((i+1))] $SESSION_ID"
     done
     echo ""
@@ -81,11 +81,15 @@ else
         exit 1
     fi
 
-    SESSION_NAME=$(echo "${SESSION_ARRAY[$((SESSION_CHOICE-1))]}" | grep -oE '(dann_training|nn_training|sk_training)(_([0-9_]+))?')
+    SESSION_NAME=$(echo "${SESSION_ARRAY[$((SESSION_CHOICE-1))]}" | grep -oE '(mnist_dann_training|dann_training|nn_training|sk_training)(_([0-9_]+))?')
 fi
 
 # Determine directory and log file based on session
 case $SESSION_NAME in
+    mnist_dann_training_*)
+        TRAINING_DIR="domain_adapt"
+        LOG_FILE="training_log_${SESSION_NAME}.txt"
+        ;;
     dann_training_*)
         TRAINING_DIR="domain_adapt"
         LOG_FILE="training_log_${SESSION_NAME}.txt"

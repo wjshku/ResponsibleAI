@@ -4,6 +4,7 @@ Complete automation scripts for training models on AWS EC2 GPU instances.
 
 **Supports:**
 - DANN (Domain Adversarial Neural Networks) - `domain_adapt/`
+- MNIST DANN (MNIST/MNIST-M domain adaptation) - `domain_adapt/`
 - Simple Detect (CNN/MLP and sklearn models) - `simple_detect_car/`
 
 ## 📋 Two Ways to Launch EC2
@@ -134,11 +135,22 @@ Key:         ~/.ssh/dann-training-key.pem
 ```
 
 **Training Options:**
+
+**DANN:**
 ```
 [1] Quick test     - 1000 samples, 10 epochs  (~30 min)
 [2] Medium         - 3000 samples, 30 epochs  (~2 hours)
 [3] Full training  - All data, 50 epochs      (~4-6 hours)
 [4] Production     - All data, 100 epochs     (~8-10 hours)
+[5] Custom         - Choose your own settings
+```
+
+**MNIST DANN:**
+```
+[1] Quick test     - 5 epochs                 (~15 min)
+[2] Medium         - 20 epochs                (~1 hour)
+[3] Full training  - 50 epochs                (~2-3 hours)
+[4] Production     - 100 epochs               (~4-5 hours)
 [5] Custom         - Choose your own settings
 ```
 

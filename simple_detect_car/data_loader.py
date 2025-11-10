@@ -8,6 +8,7 @@ manipulated results folder, including both small samples and full datasets.
 import os
 import json
 import random
+import copy
 from typing import List, Dict, Tuple, Optional, Union
 from pathlib import Path
 import cv2
@@ -168,8 +169,9 @@ class CarScratchDataset:
             processed_path = entry['processed_image_path']
             # Extract just the filename from the path
             processed_filename = os.path.basename(processed_path)
-            # Look for the file in data_dir
-            processed_path = self.data_dir / processed_filename
+            # Use entry-specific data_dir if available (for combined datasets), otherwise use instance data_dir
+            entry_data_dir = Path(entry.get('_source_data_dir', self.data_dir))
+            processed_path = entry_data_dir / processed_filename
             if not os.path.exists(processed_path):
                 return False
         
@@ -201,8 +203,9 @@ class CarScratchDataset:
             processed_path = entry['processed_image_path']
             # Extract just the filename from the path
             processed_filename = os.path.basename(processed_path)
-            # Look for the file in data_dir
-            processed_path = self.data_dir / processed_filename
+            # Use entry-specific data_dir if available (for combined datasets), otherwise use instance data_dir
+            entry_data_dir = Path(entry.get('_source_data_dir', self.data_dir))
+            processed_path = entry_data_dir / processed_filename
             processed_img = self._load_image(str(processed_path))
             result['processed_image'] = processed_img
         
@@ -330,6 +333,75 @@ class CarScratchDataset:
             forbidden_original_paths=forbidden_original_paths,
             forbidden_processed_paths=forbidden_processed_paths
         )
+
+
+def combine_datasets(datasets: List, sample_size: Optional[int] = None, random_seed: int = 42) -> 'CarScratchDataset':
+    """
+    Combine multiple CarScratchDataset instances into a single dataset.
+    
+    Args:
+        datasets: List of CarScratchDataset instances to combine
+        sample_size: If provided, sample this many entries from the combined dataset after combination.
+                     If None, use all entries from all datasets.
+        random_seed: Random seed for sampling if sample_size is provided
+        
+    Returns:
+        Combined CarScratchDataset instance
+    """
+    if not datasets:
+        raise ValueError("Cannot combine empty list of datasets")
+    
+    # Create a new dataset that concatenates all entries
+    combined = copy.copy(datasets[0])
+    combined.valid_entries = []
+    combined.shuffled_indices = []
+    
+    # Collect all valid entries from all datasets, preserving their data_dir
+    for ds in datasets:
+        for entry in ds.valid_entries:
+            # Store the original data_dir with each entry so we know where to find its files
+            entry_copy = entry.copy() if isinstance(entry, dict) else entry
+            if isinstance(entry_copy, dict):
+                entry_copy['_source_data_dir'] = str(ds.data_dir)
+            combined.valid_entries.append(entry_copy)
+    
+    # Sample from combined dataset if requested
+    total_before_sampling = len(combined.valid_entries)
+    if sample_size is not None and sample_size < len(combined.valid_entries):
+        random.seed(random_seed)
+        combined.valid_entries = random.sample(combined.valid_entries, sample_size)
+        print(f"Sampled {sample_size} entries from combined dataset of {total_before_sampling} total")
+    
+    # Create new shuffled indices for the combined dataset
+    combined.shuffled_indices = list(range(len(combined.valid_entries)))
+    if hasattr(datasets[0], 'shuffled_indices'):
+        # Re-shuffle if the original datasets had shuffling
+        random.seed(random_seed)
+        random.shuffle(combined.shuffled_indices)
+    
+    # Copy other attributes from the first dataset
+    combined.data_dir = datasets[0].data_dir
+    combined.metadata_dir = datasets[0].metadata_dir
+    combined.transform = datasets[0].transform
+    combined.load_masks = datasets[0].load_masks
+    combined.load_processed = datasets[0].load_processed
+    
+    # Preserve binary classification dataset attributes if they exist
+    if hasattr(datasets[0], 'forbidden_original_paths'):
+        # Combine forbidden paths from all datasets
+        all_forbidden_orig = set()
+        all_forbidden_proc = set()
+        for ds in datasets:
+            if hasattr(ds, 'forbidden_original_paths'):
+                all_forbidden_orig.update(ds.forbidden_original_paths)
+            if hasattr(ds, 'forbidden_processed_paths'):
+                all_forbidden_proc.update(ds.forbidden_processed_paths)
+        combined.forbidden_original_paths = all_forbidden_orig
+        combined.forbidden_processed_paths = all_forbidden_proc
+        # Clear cache as indices will be different
+        combined._forbid_cache = {}
+    
+    return combined
 
 
 def create_train_test_split(dataset, test_size=0.2, random_state=42):
