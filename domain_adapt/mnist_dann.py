@@ -33,7 +33,38 @@ import torchvision.datasets as datasets
 import numpy as np
 import random
 import os
+import time
 from pathlib import Path
+from tqdm import tqdm
+
+# Import training utilities
+from utils import create_tracker, save_training_summary
+
+
+# ============================================
+# Lambda Schedule (from DANN paper)
+# ============================================
+def compute_lambda_schedule(epoch, total_epochs, gamma=10.0, zeta=1.0):
+    """
+    Compute lambda parameter using schedule from DANN paper.
+
+    Lambda gradually increases from 0 to zeta during training following:
+        lambda_p = zeta * (2 / (1 + exp(-gamma * p)) - 1)
+
+    where p = epoch / total_epochs (training progress)
+
+    Args:
+        epoch: Current epoch (0-indexed)
+        total_epochs: Total number of training epochs
+        gamma: Sharpness of the schedule (default: 10.0 from paper)
+        zeta: Maximum adaptation strength in [0, 1] (default: 1.0)
+
+    Returns:
+        lambda_p: Adaptation strength in [0, zeta]
+    """
+    p = float(epoch) / float(total_epochs)
+    lambda_p = zeta * (2.0 / (1.0 + np.exp(-gamma * p)) - 1.0)
+    return lambda_p
 
 
 # ============================================
@@ -342,7 +373,21 @@ def train_dann_epoch(model, source_loader, target_loader, optimizer,
     total_domain_loss = 0.0
     n_batches = 0
 
-    for batch_idx in range(len_dataloader):
+    # Accuracy tracking variables
+    total_label_correct = 0
+    total_label_samples = 0
+    total_src_domain_correct = 0
+    total_src_domain_samples = 0
+    total_tgt_domain_correct = 0
+    total_tgt_domain_samples = 0
+
+    # Initialize tqdm progress bar
+    pbar = tqdm(range(len_dataloader),
+                desc=f'Epoch {epoch+1}/{n_epoch}',
+                unit='batch',
+                leave=False)
+
+    for batch_idx in pbar:
         # Calculate progress p and lambda
         p = float(batch_idx + epoch * len_dataloader) / total_batches
         alpha = 2. / (1. + np.exp(-10 * p)) - 1
@@ -369,14 +414,14 @@ def train_dann_epoch(model, source_loader, target_loader, optimizer,
 
         # Forward pass
         model.zero_grad()
-        class_output, domain_output = model(s_img, alpha)
+        class_output, src_domain_output = model(s_img, alpha)
 
         # Classification loss (digit classification)
         err_s_label = loss_class(class_output, s_label)
 
         # Domain loss (source domain = 0)
-        domain_label = torch.zeros(batch_size).long().to(device)
-        err_s_domain = loss_domain(domain_output, domain_label)
+        src_domain_label = torch.zeros(batch_size).long().to(device)
+        err_s_domain = loss_domain(src_domain_output, src_domain_label)
 
         # ============================================
         # Train on target data (MNIST-M)
@@ -394,11 +439,11 @@ def train_dann_epoch(model, source_loader, target_loader, optimizer,
         t_img = t_img.to(device)
 
         # Forward pass (only domain classification for target)
-        _, domain_output = model(t_img, alpha)
+        _, tgt_domain_output = model(t_img, alpha)
 
         # Domain loss (target domain = 1)
-        domain_label = torch.ones(batch_size).long().to(device)
-        err_t_domain = loss_domain(domain_output, domain_label)
+        tgt_domain_label = torch.ones(batch_size).long().to(device)
+        err_t_domain = loss_domain(tgt_domain_output, tgt_domain_label)
 
         # Total loss
         err = err_s_label + err_s_domain + err_t_domain
@@ -408,18 +453,55 @@ def train_dann_epoch(model, source_loader, target_loader, optimizer,
         # Track losses
         total_class_loss += err_s_label.item()
         total_domain_loss += (err_s_domain.item() + err_t_domain.item())
+
+        # Track accuracies
+        # Label accuracy (source domain digit classification)
+        class_pred = class_output.data.max(1, keepdim=True)[1].squeeze()
+        label_correct = (class_pred == s_label).sum().item()
+        total_label_correct += label_correct
+        total_label_samples += s_label.size(0)
+
+        # Domain accuracy (source domain: should predict 0)
+        src_domain_pred = src_domain_output.data.max(1, keepdim=True)[1].squeeze()
+        src_domain_correct = (src_domain_pred == src_domain_label).sum().item()
+        total_src_domain_correct += src_domain_correct
+        total_src_domain_samples += batch_size
+
+        # Domain accuracy (target domain: should predict 1)
+        tgt_domain_pred = tgt_domain_output.data.max(1, keepdim=True)[1].squeeze()
+        tgt_domain_correct = (tgt_domain_pred == tgt_domain_label).sum().item()
+        total_tgt_domain_correct += tgt_domain_correct
+        total_tgt_domain_samples += batch_size
+
         n_batches += 1
 
-        if (batch_idx + 1) % 50 == 0:
-            print(f'Epoch: {epoch+1}, Batch: {batch_idx+1}/{len_dataloader}, '
-                  f'Class Loss: {err_s_label.item():.4f}, Domain Loss: {(err_s_domain + err_t_domain).item():.4f}, '
-                  f'Lambda: {alpha:.4f}')
+        # Update progress bar with running average losses
+        running_avg_class_loss = total_class_loss / n_batches
+        running_avg_domain_loss = total_domain_loss / n_batches
 
-    # Return average losses
+        pbar.set_postfix({
+            'Class Loss': f'{running_avg_class_loss:.4f}',
+            'Domain Loss': f'{running_avg_domain_loss:.4f}',
+            'λ': f'{alpha:.3f}'
+        })
+
+        # Refresh display immediately
+        pbar.refresh()
+
+    # Close progress bar
+    pbar.close()
+
+    # Compute final accuracies
+    label_accuracy = total_label_correct / total_label_samples if total_label_samples > 0 else 0.0
+    src_domain_accuracy = total_src_domain_correct / total_src_domain_samples if total_src_domain_samples > 0 else 0.0
+    tgt_domain_accuracy = total_tgt_domain_correct / total_tgt_domain_samples if total_tgt_domain_samples > 0 else 0.0
+    domain_accuracy = (total_src_domain_correct + total_tgt_domain_correct) / (total_src_domain_samples + total_tgt_domain_samples) if (total_src_domain_samples + total_tgt_domain_samples) > 0 else 0.0
+
+    # Return average losses and accuracies
     avg_class_loss = total_class_loss / n_batches
     avg_domain_loss = total_domain_loss / n_batches
 
-    return avg_class_loss, avg_domain_loss
+    return avg_class_loss, avg_domain_loss, label_accuracy, domain_accuracy, src_domain_accuracy, tgt_domain_accuracy
 
 
 def test_model(model, test_loader, device, domain_name="test"):
@@ -441,7 +523,8 @@ def test_model(model, test_loader, device, domain_name="test"):
     n_correct = 0
 
     with torch.no_grad():
-        for data in test_loader:
+        pbar = tqdm(test_loader, desc=f'Evaluating {domain_name}', leave=False, unit='batch')
+        for data in pbar:
             img, label = data
             batch_size = len(label)
 
@@ -461,8 +544,14 @@ def test_model(model, test_loader, device, domain_name="test"):
             n_correct += pred.eq(label.data.view_as(pred)).cpu().sum().item()
             n_total += batch_size
 
+            # Update progress bar with current accuracy
+            current_acc = n_correct / n_total if n_total > 0 else 0.0
+            pbar.set_postfix({'Accuracy': f'{current_acc:.4f}'})
+
+        pbar.close()
+
     accuracy = n_correct * 1.0 / n_total
-    print(f'Accuracy on {domain_name}: {accuracy:.4f}')
+    print(f'Final accuracy on {domain_name}: {accuracy:.4f}')
 
     return accuracy
 
@@ -471,7 +560,7 @@ def test_model(model, test_loader, device, domain_name="test"):
 # Main Training Function
 # ============================================
 def train_dann(source_name='mnist', target_name='mnist_m', n_epoch=100,
-               batch_size=64, lr=1e-3, save_interval=10):
+               batch_size=64, lr=1e-3, save_interval=10, zeta=1.0):
     """
     Train DANN model for MNIST → MNIST-M adaptation.
 
@@ -482,6 +571,7 @@ def train_dann(source_name='mnist', target_name='mnist_m', n_epoch=100,
         batch_size: Batch size
         lr: Learning rate
         save_interval: Save model every N epochs
+        zeta: Maximum adaptation strength (default 1.0)
     """
     print("=" * 70)
     print("DOMAIN ADVERSARIAL NEURAL NETWORK (DANN)")
@@ -530,6 +620,9 @@ def train_dann(source_name='mnist', target_name='mnist_m', n_epoch=100,
     model_dir = Path('./models')
     model_dir.mkdir(exist_ok=True)
 
+    # Create training tracker
+    tracker = create_tracker(save_dir="./models_mnist")
+
     # Training loop
     print("\nStarting training...")
     best_source_acc = 0.0
@@ -539,8 +632,10 @@ def train_dann(source_name='mnist', target_name='mnist_m', n_epoch=100,
         print(f"\nEpoch {epoch+1}/{n_epoch}")
         print("-" * 50)
 
+        epoch_start_time = time.time()
+
         # Train for one epoch
-        class_loss, domain_loss = train_dann_epoch(
+        class_loss, domain_loss, label_acc, domain_acc, src_domain_acc, tgt_domain_acc = train_dann_epoch(
             model, source_train_loader, target_train_loader,
             optimizer, loss_class, loss_domain, device, epoch, n_epoch
         )
@@ -548,6 +643,27 @@ def train_dann(source_name='mnist', target_name='mnist_m', n_epoch=100,
         # Test on both domains
         source_acc = test_model(model, source_test_loader, device, f"{source_name} test")
         target_acc = test_model(model, target_test_loader, device, f"{target_name} test")
+
+        epoch_time = time.time() - epoch_start_time
+
+        # Update tracker with epoch metrics
+        tracker.update_epoch_metrics(
+            label_loss=class_loss,
+            domain_loss=domain_loss,
+            total_loss=class_loss + domain_loss,
+            label_accuracy=label_acc,  # Actual computed accuracy
+            domain_accuracy=domain_acc,  # Actual computed accuracy
+            source_domain_accuracy=src_domain_acc,  # Actual computed accuracy
+            target_domain_accuracy=tgt_domain_acc,  # Actual computed accuracy
+            source_val_accuracy=source_acc,
+            target_val_accuracy=target_acc,
+            lambda_value=compute_lambda_schedule(epoch, n_epoch, zeta=zeta),
+            epoch_time=epoch_time
+        )
+
+        # Track gradients (call after loss.backward() in train_dann_epoch)
+        # Note: This would need to be modified in train_dann_epoch to track gradients
+        # tracker.track_gradients(model)
 
         # Save best models
         if source_acc > best_source_acc:
@@ -562,15 +678,32 @@ def train_dann(source_name='mnist', target_name='mnist_m', n_epoch=100,
         if (epoch + 1) % save_interval == 0:
             torch.save(model.state_dict(), model_dir / f'model_epoch_{epoch+1}.pth')
 
-        print(".4f"
-              ".4f"
-              ".4f")
+        print(f"Epoch {epoch+1}/{n_epoch} | Source Acc: {source_acc:.4f} | Target Acc: {target_acc:.4f} | Time: {epoch_time:.1f}s")
 
     print("\n" + "=" * 70)
     print("TRAINING COMPLETED")
-    print(".4f")
-    print(".4f")
+    print(f"Best Source Accuracy: {best_source_acc:.4f}")
+    print(f"Best Target Accuracy: {best_target_acc:.4f}")
     print("=" * 70)
+
+    # Generate plots and save results
+    print("\nGenerating training plots...")
+    tracker.generate_all_plots()
+    tracker.save_metrics()
+    tracker.print_summary()
+
+    # Save training summary
+    config = {
+        'source_name': source_name,
+        'target_name': target_name,
+        'n_epoch': n_epoch,
+        'batch_size': batch_size,
+        'learning_rate': lr,
+        'save_interval': save_interval
+    }
+    save_training_summary(tracker, model, config)
+
+    print(f"\nAll results saved to {tracker.save_dir}/")
 
 
 if __name__ == "__main__":

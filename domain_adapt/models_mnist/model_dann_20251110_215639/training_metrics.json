@@ -1,0 +1,51 @@
+{
+  "train_losses": {
+    "label_loss": [
+      0.3558983759401031
+    ],
+    "domain_loss": [
+      1.2918437252431267
+    ],
+    "total_loss": [
+      1.6477421011832298
+    ]
+  },
+  "train_accuracies": {
+    "label_accuracy": [
+      85.0
+    ],
+    "domain_accuracy": [
+      50.0
+    ],
+    "source_domain_accuracy": [
+      50.0
+    ],
+    "target_domain_accuracy": [
+      50.0
+    ]
+  },
+  "val_accuracies": {
+    "source_accuracy": [
+      0.9751
+    ],
+    "target_accuracy": [
+      0.6928119097878014
+    ]
+  },
+  "gradients": {
+    "feature_extractor": [],
+    "label_classifier": [],
+    "domain_classifier": []
+  },
+  "lambda_values": [
+    0.0
+  ],
+  "epoch_times": [
+    86.59790110588074
+  ],
+  "best_accuracies": {
+    "source": 0.9751,
+    "target": 0.6928119097878014,
+    "epoch": 1
+  }
+}

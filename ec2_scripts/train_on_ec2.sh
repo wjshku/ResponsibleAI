@@ -184,25 +184,21 @@ elif [ "$TRAINING_TYPE" == "2" ]; then
             NUM_EPOCHS=5
             BATCH_SIZE=128
             LEARNING_RATE=0.001
-            ZETA=1.0
             ;;
         2)
             NUM_EPOCHS=20
             BATCH_SIZE=128
             LEARNING_RATE=0.001
-            ZETA=1.0
             ;;
         3)
             NUM_EPOCHS=50
             BATCH_SIZE=128
             LEARNING_RATE=0.001
-            ZETA=1.0
             ;;
         4)
             NUM_EPOCHS=100
             BATCH_SIZE=128
             LEARNING_RATE=0.001
-            ZETA=1.0
             ;;
         5)
             read -p "Number of epochs: " NUM_EPOCHS
@@ -210,8 +206,6 @@ elif [ "$TRAINING_TYPE" == "2" ]; then
             BATCH_SIZE=${BATCH_SIZE:-128}
             read -p "Learning rate (default 0.001): " LEARNING_RATE
             LEARNING_RATE=${LEARNING_RATE:-0.001}
-            read -p "Zeta (adaptation strength, default 1.0, try 2.0-3.0): " ZETA
-            ZETA=${ZETA:-1.0}
             ;;
         *)
             echo "Invalid choice"
@@ -224,7 +218,6 @@ elif [ "$TRAINING_TYPE" == "2" ]; then
     echo "  Epochs: $NUM_EPOCHS"
     echo "  Batch size: $BATCH_SIZE"
     echo "  Learning rate: $LEARNING_RATE"
-    echo "  Zeta (adaptation strength): $ZETA"
     echo ""
 else
     # Simple Detect configuration
@@ -358,7 +351,7 @@ print("✓ DANN configuration updated")
 PYTHON_EOF
 EOF
 elif [ "$TRAINING_TYPE" == "2" ]; then
-    # Update MNIST DANN script
+    # Update MNIST DANN script - this script uses function parameters, not config dict
     ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -i "$EC2_KEY_PATH" "$EC2_SSH_USER@$EC2_PUBLIC_IP" << EOF
 cd ~/ResponsibleAI/domain_adapt
 
@@ -366,7 +359,6 @@ cd ~/ResponsibleAI/domain_adapt
 export BATCH_SIZE="$BATCH_SIZE"
 export NUM_EPOCHS="$NUM_EPOCHS"
 export LEARNING_RATE="$LEARNING_RATE"
-export ZETA="$ZETA"
 
 python3 << PYTHON_EOF
 import re
@@ -375,47 +367,22 @@ import os
 with open('mnist_dann.py', 'r') as f:
     content = f.read()
 
-# Update batch_size (handle both ternary and simple formats)
+# Update train_dann function call parameters
 batch_size = os.environ['BATCH_SIZE']
-content = re.sub(
-    r"'batch_size': \d+ if quick_test else \d+,",
-    f"'batch_size': {batch_size} if quick_test else {batch_size},",
-    content
-)
-# Also handle simple format
-content = re.sub(
-    r"'batch_size': \d+,",
-    f"'batch_size': {batch_size},",
-    content
-)
-
-# Update num_epochs (handle both ternary and simple formats)
 num_epochs = os.environ['NUM_EPOCHS']
-content = re.sub(
-    r"'num_epochs': \d+ if quick_test else \d+,",
-    f"'num_epochs': {num_epochs} if quick_test else {num_epochs},",
-    content
-)
-# Also handle simple format
-content = re.sub(
-    r"'num_epochs': \d+,",
-    f"'num_epochs': {num_epochs},",
-    content
-)
-
-# Update learning_rate
 learning_rate = os.environ['LEARNING_RATE']
+
+# Update the train_dann function call at the end of the file
 content = re.sub(
-    r"'learning_rate': [\de\.\-]+,",
-    f"'learning_rate': {learning_rate},",
+    r'train_dann\(n_epoch=\d+, batch_size=\d+\)',
+    f'train_dann(n_epoch={num_epochs}, batch_size={batch_size}, lr={learning_rate})',
     content
 )
 
-# Update zeta
-zeta = os.environ['ZETA']
+# Also update the default parameters in the function signature if needed
 content = re.sub(
-    r"'zeta': [\d.]+,",
-    f"'zeta': {zeta},",
+    r'batch_size=64, lr=1e-3',
+    f'batch_size={batch_size}, lr={learning_rate}',
     content
 )
 

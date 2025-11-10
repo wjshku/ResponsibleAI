@@ -1,0 +1,27 @@
+{
+  "config": {
+    "source_name": "mnist",
+    "target_name": "mnist_m",
+    "n_epoch": 2,
+    "batch_size": 32,
+    "learning_rate": 0.001,
+    "save_interval": 10
+  },
+  "best_accuracies": {
+    "source": 0.9807,
+    "target": 0.758582379735585,
+    "epoch": 2
+  },
+  "final_metrics": {
+    "label_loss": 0.23986734446429056,
+    "domain_loss": 1.2775396312427365,
+    "label_accuracy": 85.0,
+    "domain_accuracy": 50.0,
+    "source_val_accuracy": 0.9807,
+    "target_val_accuracy": 0.758582379735585
+  },
+  "model_info": {
+    "parameters": 257254,
+    "trainable_parameters": 257254
+  }
+}
