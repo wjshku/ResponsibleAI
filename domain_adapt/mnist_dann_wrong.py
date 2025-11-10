@@ -713,6 +713,7 @@ def main():
         'learning_rate': 1e-3,
         'weight_decay': 1e-4,
         'zeta': 1.0,  # Maximum adaptation strength (try 1.0, 2.0, 3.0 for stronger GRL)
+        'image_size': 28,  # Image size for resizing
         'device': device,
         'save_dir': save_dir,
         'experiment_name': f'model_dann_{timestamp}',
@@ -730,15 +731,17 @@ def main():
 
     # Data transforms for MNIST (grayscale)
     mnist_transform = transforms.Compose([
+        transforms.Resize(config['image_size']),
+        transforms.Grayscale(3),  # Convert to 3 channels for consistency with MNIST-M
         transforms.ToTensor(),
-        transforms.Normalize((0.1307,), (0.3081,))  # MNIST mean and std
+        transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))
     ])
 
     # Data transforms for MNIST-M (RGB)
-    # Note: Images are already resized to 28x28 during dataset loading
     mnist_m_transform = transforms.Compose([
+        transforms.Resize(config['image_size']),
         transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))  # Standard RGB normalization
+        transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))
     ])
 
     # Create real MNIST and MNIST-M datasets
