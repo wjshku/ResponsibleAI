@@ -1,942 +1,577 @@
 #!/usr/bin/env python3
 """
-Test DANN workflow on MNIST vs MNIST-M dataset.
+Domain Adversarial Neural Network (DANN) for MNIST → MNIST-M adaptation.
 
-This script verifies that our DANN implementation works on the classic
-domain adaptation benchmark from the original DANN paper.
+This replicates the classic experiment from "Unsupervised Domain Adaptation by Backpropagation"
+(Ganin & Lempitsky, 2015) where MNIST digits are adapted to the MNIST-M dataset.
 
-MNIST-M: MNIST digits blended with random patches from BSDS500 dataset
+The model learns to:
+1. Classify MNIST digits (0-9) on source domain
+2. Become domain-invariant using gradient reversal
+3. Maintain classification accuracy on target domain (MNIST-M)
+
+Architecture:
+    Input Image (28x28x3)
+        ↓
+    Feature Extractor (CNN)
+        ↓
+    Features (800-dim)
+        ↓
+        ├→ Label Predictor → Digit classification (0-9)
+        │
+        └→ [GRL] → Domain Classifier → MNIST/MNIST-M classification
 """
 
-import os
-import sys
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader
+from torch.autograd import Variable
 import torchvision.transforms as transforms
-from tqdm import tqdm
+import torchvision.datasets as datasets
 import numpy as np
+import random
+import os
 from pathlib import Path
-import logging
-from datetime import datetime
-import gzip
-import struct
-
-# Set matplotlib backend to avoid display issues
-import matplotlib
-matplotlib.use('Agg')  # Use non-interactive backend
-import matplotlib.pyplot as plt
-
-# Add current directory to path
-
-
-class MNISTDataset(Dataset):
-    """MNIST dataset loader - loads data from binary files."""
-
-    def __init__(self, root='./data', train=True, transform=None, max_samples=None):
-        self.root = root
-        self.train = train
-        self.transform = transform
-        self.max_samples = max_samples
-
-        # Load MNIST data manually
-        self.data, self.labels = self._load_mnist()
-
-    def _load_mnist(self):
-        """Load MNIST data from binary files."""
-        import os
-
-        # Determine file paths
-        data_split = 'train' if self.train else 't10k'
-        images_file = os.path.join(self.root, 'MNIST', 'raw', f'{data_split}-images-idx3-ubyte')
-        labels_file = os.path.join(self.root, 'MNIST', 'raw', f'{data_split}-labels-idx1-ubyte')
-
-        if not os.path.exists(images_file) or not os.path.exists(labels_file):
-            raise FileNotFoundError(f"MNIST {data_split} data not found. Please ensure MNIST data is downloaded to {self.root}/MNIST/raw/")
-
-        # Load images
-        with open(images_file, 'rb') as f:
-            magic, num_images, rows, cols = struct.unpack('>IIII', f.read(16))
-            images = np.frombuffer(f.read(), dtype=np.uint8).reshape(num_images, rows, cols)
-
-        # Load labels
-        with open(labels_file, 'rb') as f:
-            magic, num_labels = struct.unpack('>II', f.read(8))
-            labels = np.frombuffer(f.read(), dtype=np.uint8)
-
-        # Convert to tensors
-        images = torch.from_numpy(images).float().unsqueeze(1)  # Add channel dimension
-        labels = torch.from_numpy(labels).long()
-
-        # Apply max_samples limit if specified
-        if self.max_samples is not None and len(images) > self.max_samples:
-            indices = torch.randperm(len(images))[:self.max_samples]
-            images = images[indices]
-            labels = labels[indices]
-
-        print(f"✅ Loaded MNIST {'train' if self.train else 'test'}: {len(images)} samples")
-        return images, labels
-
-    def __len__(self):
-        return len(self.labels)
-
-    def __getitem__(self, idx):
-        img, label = self.data[idx], self.labels[idx]
-
-        # Note: images are already tensors, so we skip ToTensor in transform
-        # Only apply normalization if specified
-        if self.transform:
-            # Apply transforms, but skip ToTensor since images are already tensors
-            for t in self.transform.transforms:
-                if not isinstance(t, transforms.ToTensor):
-                    img = t(img)
-
-        return img, label
-
-
-def setup_logging(save_dir, experiment_name):
-    """Setup logging to both console and file."""
-    # Setup logging - save log file directly in experiment directory
-    log_filename = os.path.join(save_dir, f'{experiment_name}.log')
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler(log_filename),
-            logging.StreamHandler(sys.stdout)
-        ]
-    )
-
-    # Log experiment start
-    logging.info(f"Starting experiment: {experiment_name}")
-    logging.info(f"Results will be saved to: {save_dir}")
-
-    return logging.getLogger()
-
-
-# Add current directory to path
-sys.path.append(str(Path(__file__).parent))
-# We'll define our own components instead of importing from model_dann
-
-# Import torch for loading MNIST-M data
-import torch
 
 
 # ============================================
-# Gradient Reversal Layer Components
+# Gradient Reversal Layer (GRL)
 # ============================================
-class GradientReversalFunction(torch.autograd.Function):
+class ReverseLayerF(torch.autograd.Function):
     """
-    Gradient Reversal Layer (GRL) from the DANN paper.
+    Gradient Reversal Layer from the DANN paper.
 
-    Forward pass: Identity function (output = input)
-    Backward pass: Multiply gradient by -lambda (reversed gradient)
+    Forward pass: Identity function
+    Backward pass: Multiply gradient by -alpha (reversal)
     """
 
     @staticmethod
-    def forward(ctx, x, lambda_):
-        """Forward pass: Identity transformation."""
-        ctx.lambda_ = lambda_
+    def forward(ctx, x, alpha):
+        ctx.alpha = alpha
         return x.view_as(x)
 
     @staticmethod
     def backward(ctx, grad_output):
-        """Backward pass: Reverse and scale gradient."""
-        lambda_ = ctx.lambda_
-        grad_input = -lambda_ * grad_output
-        return grad_input, None
+        output = grad_output.neg() * ctx.alpha
+        return output, None
 
 
-class GradientReversalLayer(nn.Module):
-    """Gradient Reversal Layer as a PyTorch module."""
+# ============================================
+# DANN Model (CNN for MNIST)
+# ============================================
+class CNNModel(nn.Module):
+    """
+    CNN Model for DANN with MNIST/MNIST-M adaptation.
+
+    Based on the architecture from the original DANN paper.
+    Adapted for 28x28 RGB images (MNIST-M has color).
+    """
 
     def __init__(self):
-        super(GradientReversalLayer, self).__init__()
-        self.lambda_ = 1.0
+        super(CNNModel, self).__init__()
 
-    def forward(self, x):
-        """Apply gradient reversal with current lambda value."""
-        return GradientReversalFunction.apply(x, self.lambda_)
+        # ============================================
+        # Feature Extractor (Shared CNN backbone)
+        # ============================================
+        self.feature = nn.Sequential()
+        self.feature.add_module('f_conv1', nn.Conv2d(3, 64, kernel_size=5))
+        self.feature.add_module('f_bn1', nn.BatchNorm2d(64))
+        self.feature.add_module('f_pool1', nn.MaxPool2d(2))
+        self.feature.add_module('f_relu1', nn.ReLU(True))
+        self.feature.add_module('f_conv2', nn.Conv2d(64, 50, kernel_size=5))
+        self.feature.add_module('f_bn2', nn.BatchNorm2d(50))
+        self.feature.add_module('f_drop1', nn.Dropout2d())
+        self.feature.add_module('f_pool2', nn.MaxPool2d(2))
+        self.feature.add_module('f_relu2', nn.ReLU(True))
 
+        # ============================================
+        # Label Predictor: Digit classification (0-9)
+        # ============================================
+        self.class_classifier = nn.Sequential()
+        self.class_classifier.add_module('c_fc1', nn.Linear(50 * 4 * 4, 100))
+        self.class_classifier.add_module('c_bn1', nn.BatchNorm1d(100))
+        self.class_classifier.add_module('c_relu1', nn.ReLU(True))
+        self.class_classifier.add_module('c_drop1', nn.Dropout())
+        self.class_classifier.add_module('c_fc2', nn.Linear(100, 100))
+        self.class_classifier.add_module('c_bn2', nn.BatchNorm1d(100))
+        self.class_classifier.add_module('c_relu2', nn.ReLU(True))
+        self.class_classifier.add_module('c_fc3', nn.Linear(100, 10))
+        self.class_classifier.add_module('c_softmax', nn.LogSoftmax(dim=1))
 
-# ============================================
-# MNIST-M Dataset Creation
-# ============================================
-class MNISTMDataset(Dataset):
-    """
-    MNIST-M dataset: MNIST digits with BSDS500 backgrounds.
+        # ============================================
+        # Domain Classifier: Source vs Target (MNIST vs MNIST-M)
+        # ============================================
+        self.domain_classifier = nn.Sequential()
+        self.domain_classifier.add_module('d_fc1', nn.Linear(50 * 4 * 4, 100))
+        self.domain_classifier.add_module('d_bn1', nn.BatchNorm1d(100))
+        self.domain_classifier.add_module('d_relu1', nn.ReLU(True))
+        self.domain_classifier.add_module('d_fc2', nn.Linear(100, 2))
+        self.domain_classifier.add_module('d_softmax', nn.LogSoftmax(dim=1))
 
-    Your format: Images in folders + labels in .txt files
-    """
-
-    def __init__(self, root='./data', train=True, transform=None, max_samples=None):
+    def forward(self, input_data, alpha=1.0):
         """
-        Args:
-            root: Root directory for data
-            train: Whether to load training set
-            transform: Optional transform
-            max_samples: Maximum number of samples to load (for quick testing)
-        """
-        self.root = root
-        self.train = train
-        self.transform = transform
-        self.max_samples = max_samples
-
-        # Load MNIST-M data from your format
-        self.data, self.labels = self._load_mnist_m()
-
-    def _load_mnist_m(self):
-        """Load MNIST-M dataset from your folder + txt format."""
-        import os
-        from PIL import Image
-
-        # Determine paths
-        data_split = 'train' if self.train else 'test'
-        img_dir = os.path.join(self.root, 'mnist_m', f'mnist_m_{data_split}')
-        label_file = os.path.join(self.root, 'mnist_m', f'mnist_m_{data_split}_labels.txt')
-
-        if not os.path.exists(img_dir) or not os.path.exists(label_file):
-            raise FileNotFoundError(f"MNIST-M {data_split} data not found at {img_dir} or {label_file}")
-
-        # Load labels from txt file
-        labels_dict = {}
-        with open(label_file, 'r') as f:
-            for line in f:
-                filename, label = line.strip().split()
-                labels_dict[filename] = int(label)
-
-        # Apply max_samples by randomly sampling files (much faster for quick testing)
-        if self.max_samples is not None and len(labels_dict) > self.max_samples:
-            import random
-            sampled_items = random.sample(list(labels_dict.items()), self.max_samples)
-            labels_dict = dict(sampled_items)
-
-        # Load images and create tensors
-        data_list = []
-        labels_list = []
-
-        print(f"Loading MNIST-M {data_split} images ({len(labels_dict)} samples)...")
-        for filename, label in labels_dict.items():
-            img_path = os.path.join(img_dir, filename)
-            if os.path.exists(img_path):
-                # Load image and resize to 28x28 to match MNIST dimensions
-                img = Image.open(img_path).convert('RGB')
-                img = img.resize((28, 28), Image.Resampling.LANCZOS)
-
-                # Convert to tensor
-                img_tensor = transforms.ToTensor()(img)
-
-                data_list.append(img_tensor)
-                labels_list.append(label)
-            else:
-                print(f"Warning: {img_path} not found")
-
-        # Stack into tensors
-        data = torch.stack(data_list)
-        labels = torch.tensor(labels_list)
-
-        print(f"✅ Loaded MNIST-M {data_split}: {len(data)} samples")
-        return data, labels
-
-    def __len__(self):
-        return len(self.labels)
-
-    def __getitem__(self, idx):
-        img, label = self.data[idx], self.labels[idx]
-
-        # Note: images are already tensors, so we skip ToTensor in transform
-        # Only apply normalization if specified
-        if self.transform:
-            # Apply transforms, but skip ToTensor since images are already tensors
-            for t in self.transform.transforms:
-                if not isinstance(t, transforms.ToTensor):
-                    img = t(img)
-
-        return img, label
-
-
-# ============================================
-# DANN Model for MNIST/MNIST-M
-# ============================================
-class MNISTDANN(nn.Module):
-    """DANN for MNIST/MNIST-M domain adaptation (digits 0-9).
-    
-    Architecture matches the DANN paper:
-    - Feature extractor: 2 conv layers (32 and 48 maps) with max-pooling
-    - Label predictor: 2 FC layers (100 units each) + output (10 units, softmax)
-    - Domain classifier: 1 FC layer (100 units) + output (1 unit, sigmoid)
-    """
-
-    def __init__(self, num_classes=10):
-        super(MNISTDANN, self).__init__()
-
-        # Feature extractor (matches paper architecture)
-        # Layer 1: conv 5x5, 32 maps, ReLU -> max-pool 2x2, stride 2x2
-        # Layer 2: conv 5x5, 48 maps, ReLU -> max-pool 2x2, stride 2x2
-        # Use adaptive pooling to handle variable input sizes (MNIST vs MNIST-M)
-        self.feature_extractor = nn.Sequential(
-            # First conv: input -> same size (with padding=2 to maintain size)
-            nn.Conv2d(3, 32, kernel_size=5, stride=1, padding=2),
-            nn.ReLU(inplace=True),
-            # Max-pool 2x2, stride 2x2: HxW -> H/2 x W/2
-            nn.MaxPool2d(kernel_size=2, stride=2),
-            
-            # Second conv: H/2 x W/2 -> H/2 x W/2 (with padding=2)
-            nn.Conv2d(32, 48, kernel_size=5, stride=1, padding=2),
-            nn.ReLU(inplace=True),
-            # Max-pool 2x2, stride 2x2: H/2 x W/2 -> H/4 x W/4
-            nn.MaxPool2d(kernel_size=2, stride=2),
-            
-            # Adaptive pooling to ensure consistent output size (7x7 for 28x28 input)
-            # This handles variable input sizes gracefully
-            nn.AdaptiveAvgPool2d((7, 7)),
-            
-            # Flatten: 48 * 7 * 7 = 2352
-            nn.Flatten()
-        )
-
-        # Input adaptation layer for grayscale images
-        self.input_adapter = nn.Conv2d(1, 3, kernel_size=1)  # Convert 1-channel to 3-channel
-
-        # Calculate feature dimension: 48 * 7 * 7 = 2352
-        self.feature_dim = 48 * 7 * 7
-
-        # Label predictor (digit classification)
-        # fully-conn, 100 units, ReLU -> fully-conn, 100 units, ReLU -> fully-conn, 10 units, Soft-max
-        self.label_predictor = nn.Sequential(
-            nn.Linear(self.feature_dim, 100),
-            nn.ReLU(inplace=True),
-            nn.Linear(100, 100),
-            nn.ReLU(inplace=True),
-            nn.Linear(100, num_classes)
-            # Softmax will be applied in loss function (CrossEntropyLoss includes it)
-        )
-
-        # Domain classifier (MNIST vs MNIST-M)
-        # GRL -> fully-conn, 100 units, ReLU -> fully-conn, 1 unit, Logistic (sigmoid)
-        self.domain_classifier = nn.Sequential(
-            nn.Linear(self.feature_dim, 100),
-            nn.ReLU(inplace=True),
-            nn.Linear(100, 1)
-            # Sigmoid will be applied in loss function (BCEWithLogitsLoss includes it)
-        )
-
-        # Gradient reversal layer
-        self.grl = GradientReversalLayer()
-
-    def forward(self, x, lambda_=1.0):
-        """
-        Forward pass.
+        Forward pass through DANN model.
 
         Args:
-            x: Input images (can be 1-channel grayscale or 3-channel RGB)
-            lambda_: Adaptation strength
+            input_data: Input images (batch, 3, 28, 28)
+            alpha: Gradient reversal strength (0=no reversal, 1=full reversal)
 
         Returns:
-            label_output: Digit classification logits
-            domain_output: Domain classification logits
+            class_output: Digit predictions (batch, 10)
+            domain_output: Domain predictions (batch, 2)
         """
-        # Adapt input channels if necessary (grayscale to RGB)
-        if x.size(1) == 1:  # Grayscale input
-            x = self.input_adapter(x)  # Convert to 3-channel
-
         # Extract features
-        features = self.feature_extractor(x)
+        feature = self.feature(input_data)
+        feature = feature.view(-1, 50 * 4 * 4)
 
-        # Label prediction (digit classification)
-        label_output = self.label_predictor(features)
+        # Apply gradient reversal for domain classification
+        reverse_feature = ReverseLayerF.apply(feature, alpha)
 
-        # Domain prediction (with gradient reversal)
-        self.grl.lambda_ = lambda_
-        reversed_features = self.grl(features)
-        domain_output = self.domain_classifier(reversed_features)
+        # Class prediction (digit classification)
+        class_output = self.class_classifier(feature)
 
-        return label_output, domain_output
+        # Domain prediction (source vs target)
+        domain_output = self.domain_classifier(reverse_feature)
 
-
-# ============================================
-# Training Functions
-# ============================================
-def compute_lambda_schedule(p, gamma=10.0, zeta=1.0):
-    """Compute lambda schedule from DANN paper: lambda_p = zeta * (2/(1+exp(-gamma*p)) - 1)"""
-    return zeta * (2.0 / (1.0 + np.exp(-gamma * p)) - 1.0)
-
-
-def train_epoch(model, source_loader, target_loader, optimizer,
-                criterion_label, criterion_domain, device, epoch, total_epochs, config):
-    """Train one epoch of DANN."""
-
-    model.train()
-    total_label_loss = 0.0
-    total_domain_loss = 0.0
-    total_label_correct = 0
-    total_domain_correct = 0
-    total_samples = 0
-
-    # Create iterators
-    source_iter = iter(source_loader)
-    target_iter = iter(target_loader)
-
-    # Train until shorter dataset is exhausted
-    num_batches = min(len(source_loader), len(target_loader))
-
-    for batch_idx in tqdm(range(num_batches), desc=f"Epoch {epoch+1}/{total_epochs}"):
-
-        # Get source batch (labeled)
-        try:
-            batch = next(source_iter)
-            if len(batch) == 3:  # (images, labels, domain)
-                source_images, source_labels, _ = batch
-            else:  # (images, labels)
-                source_images, source_labels = batch
-        except StopIteration:
-            source_iter = iter(source_loader)
-            batch = next(source_iter)
-            if len(batch) == 3:
-                source_images, source_labels, _ = batch
-            else:
-                source_images, source_labels = batch
-
-        source_images = source_images.to(device)
-        source_labels = source_labels.to(device)
-
-        # Get target batch (unlabeled for domain adaptation)
-        try:
-            batch = next(target_iter)
-            if len(batch) == 3:  # (images, labels, domain)
-                target_images, _, _ = batch
-            else:  # (images, labels)
-                target_images, _ = batch
-        except StopIteration:
-            target_iter = iter(target_loader)
-            batch = next(target_iter)
-            if len(batch) == 3:
-                target_images, _, _ = batch
-            else:
-                target_images, _ = batch
-
-        target_images = target_images.to(device)
-
-        # Zero gradients
-        optimizer.zero_grad()
-
-        # Compute lambda for this epoch
-        p = (epoch * num_batches + batch_idx) / (total_epochs * num_batches)
-        lambda_ = compute_lambda_schedule(p, zeta=config['zeta'])
-
-        # Forward pass for source domain
-        source_label_pred, source_domain_pred = model(source_images, lambda_)
-
-        # Forward pass for target domain
-        target_label_pred, target_domain_pred = model(target_images, lambda_)
-
-        # Label loss (only on source domain)
-        label_loss = criterion_label(source_label_pred, source_labels)
-
-        # Domain loss (on both domains)
-        # Binary classification: 0.0 for source (MNIST), 1.0 for target (MNIST-M)
-        source_domain_labels = torch.zeros(source_images.size(0), dtype=torch.float32, device=device).unsqueeze(1)
-        target_domain_labels = torch.ones(target_images.size(0), dtype=torch.float32, device=device).unsqueeze(1)
-
-        domain_loss = criterion_domain(source_domain_pred, source_domain_labels) + \
-                     criterion_domain(target_domain_pred, target_domain_labels)
-
-        # Total loss
-        total_loss = label_loss + domain_loss
-
-        # Backward pass
-        total_loss.backward()
-
-        # Gradient clipping to prevent exploding gradients
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-
-        optimizer.step()
-
-        # Statistics
-        total_label_loss += label_loss.item()
-        total_domain_loss += domain_loss.item()
-
-        # Label accuracy (source only)
-        _, predicted_labels = torch.max(source_label_pred, 1)
-        total_label_correct += (predicted_labels == source_labels).sum().item()
-
-        # Domain accuracy (both domains)
-        # Apply sigmoid and threshold at 0.5 for binary classification
-        source_domain_probs = torch.sigmoid(source_domain_pred)
-        target_domain_probs = torch.sigmoid(target_domain_pred)
-        predicted_source_domains = (source_domain_probs > 0.5).long()
-        predicted_target_domains = (target_domain_probs > 0.5).long()
-
-        total_domain_correct += (predicted_source_domains == source_domain_labels.long()).sum().item()
-        total_domain_correct += (predicted_target_domains == target_domain_labels.long()).sum().item()
-
-        total_samples += source_images.size(0) + target_images.size(0)
-
-    # Return averages
-    avg_label_loss = total_label_loss / num_batches
-    avg_domain_loss = total_domain_loss / num_batches
-    label_accuracy = total_label_correct / (total_samples // 2)  # Only source samples
-    domain_accuracy = total_domain_correct / total_samples
-
-    return {
-        'label_loss': avg_label_loss,
-        'domain_loss': avg_domain_loss,
-        'label_accuracy': label_accuracy,
-        'domain_accuracy': domain_accuracy,
-        'lambda': lambda_
-    }
-
-
-def evaluate(model, dataloader, device, domain_name="Unknown", criterion=None):
-    """Evaluate model on a dataset."""
-
-    model.eval()
-    correct = 0
-    total = 0
-    total_loss = 0.0
-
-    with torch.no_grad():
-        for batch in dataloader:
-            if len(batch) == 3:  # Training format: (images, labels, domain)
-                images, labels, _ = batch
-            else:  # Test format: (images, labels)
-                images, labels = batch
-
-            images = images.to(device)
-            labels = labels.to(device)
-
-            # Only use label prediction (no domain adaptation during eval)
-            label_outputs, _ = model(images, lambda_=0.0)
-
-            _, predicted = torch.max(label_outputs, 1)
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
-
-            # Calculate loss if criterion provided
-            if criterion is not None:
-                loss = criterion(label_outputs, labels)
-                total_loss += loss.item() * labels.size(0)
-
-    accuracy = correct / total
-    avg_loss = total_loss / total if criterion is not None else None
-
-    if criterion is not None:
-        print(f"{domain_name} Loss: {avg_loss:.4f}, Accuracy: {accuracy:.4f} ({correct}/{total})")
-        return accuracy, avg_loss
-    else:
-        print(f"{domain_name} Accuracy: {accuracy:.4f} ({correct}/{total})")
-        return accuracy
-
-
-def plot_training_losses(history, save_dir, logger=None):
-    """Plot and save training loss curves for DANN adversarial training."""
-    import matplotlib.pyplot as plt
-
-    if logger is None:
-        logger = logging.getLogger()
-
-    # Extract data from history
-    epochs = [h['epoch'] for h in history]
-    label_losses = [h['label_loss'] for h in history]
-    domain_losses = [h['domain_loss'] for h in history]
-    total_losses = [h['label_loss'] + h['domain_loss'] for h in history]
-    lambdas = [h['lambda'] for h in history]
-
-    # Create figure with subplots
-    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
-    fig.suptitle('DANN Training: Class Classifier vs Domain Classifier Losses', fontsize=16, fontweight='bold')
-
-    # Plot 1: Main losses (Class vs Domain Classifier)
-    ax1.plot(epochs, label_losses, 'b-', linewidth=2, label='Class Classifier Loss', marker='o', markersize=4)
-    ax1.plot(epochs, domain_losses, 'r-', linewidth=2, label='Domain Classifier Loss', marker='s', markersize=4)
-    ax1.set_title('Adversarial Losses (Generator vs Discriminator)', fontweight='bold')
-    ax1.set_xlabel('Epoch')
-    ax1.set_ylabel('Loss')
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
-
-    # Plot 2: Total loss
-    ax2.plot(epochs, total_losses, 'g-', linewidth=2, label='Total Loss', marker='^', markersize=4)
-    ax2.set_title('Total Training Loss', fontweight='bold')
-    ax2.set_xlabel('Epoch')
-    ax2.set_ylabel('Loss')
-    ax2.legend()
-    ax2.grid(True, alpha=0.3)
-
-    # Plot 3: Individual losses with different scales
-    ax3.plot(epochs, label_losses, 'b-', linewidth=2, label='Class Loss', marker='o', markersize=4)
-    ax3.set_title('Class Classifier Loss', fontweight='bold')
-    ax3.set_xlabel('Epoch')
-    ax3.set_ylabel('Loss')
-    ax3.legend()
-    ax3.grid(True, alpha=0.3)
-
-    ax4.plot(epochs, domain_losses, 'r-', linewidth=2, label='Domain Loss', marker='s', markersize=4)
-    ax4.set_title('Domain Classifier Loss', fontweight='bold')
-    ax4.set_xlabel('Epoch')
-    ax4.set_ylabel('Loss')
-    ax4.legend()
-    ax4.grid(True, alpha=0.3)
-
-    # Adjust layout and save
-    plt.tight_layout()
-
-    # Save the plot
-    plot_path = os.path.join(save_dir, 'dann_training_losses.png')
-    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-
-    # Close the figure to free memory
-    plt.close(fig)
-
-    # Create a second plot focusing on the adversarial dynamics (lambda schedule)
-    fig2, ax = plt.subplots(1, 1, figsize=(10, 6))
-    ax2 = ax.twinx()
-
-    # Plot losses
-    line1 = ax.plot(epochs, label_losses, 'b-', linewidth=2, label='Class Classifier (Generator)', marker='o', markersize=4)
-    line2 = ax.plot(epochs, domain_losses, 'r-', linewidth=2, label='Domain Classifier (Discriminator)', marker='s', markersize=4)
-
-    # Plot lambda schedule
-    line3 = ax2.plot(epochs, lambdas, 'g--', linewidth=2, label='Lambda (GRL Strength)', marker='^', markersize=4)
-
-    ax.set_title('DANN Adversarial Training Dynamics', fontweight='bold')
-    ax.set_xlabel('Epoch')
-    ax.set_ylabel('Loss', color='black')
-    ax2.set_ylabel('Lambda (Gradient Reversal Strength)', color='green')
-
-    # Combine legends
-    lines = line1 + line2 + line3
-    labels = [l.get_label() for l in lines]
-    ax.legend(lines, labels, loc='upper right')
-
-    ax.grid(True, alpha=0.3)
-
-    # Save the adversarial dynamics plot
-    plot_path2 = os.path.join(save_dir, 'dann_adversarial_dynamics.png')
-    plt.savefig(plot_path2, dpi=300, bbox_inches='tight')
-
-    plt.close(fig2)
+        return class_output, domain_output
 
 
 # ============================================
-# Main Training Script
+# MNIST-M Dataset (Custom dataset for MNIST-M)
 # ============================================
-def train_baseline(source_loader, target_loader, config, num_epochs=5):
-    """Train a baseline model without domain adaptation."""
-    print("\n📊 Training Baseline Model (No Domain Adaptation)...")
+class MNISTM(torch.utils.data.Dataset):
+    """
+    MNIST-M dataset loader.
 
-    model = MNISTDANN(num_classes=10)
-    model.to(config['device'])
+    MNIST-M is MNIST digits blended with random patches from BSDS500 dataset.
+    Images are stored as PNG files with labels in text files.
+    """
 
-    criterion = nn.CrossEntropyLoss()
-    # Baseline uses fixed learning rate of 0.001 (following original DANN paper)
-    baseline_lr = 1e-3
-    optimizer = optim.Adam(model.parameters(), lr=baseline_lr,
-                          weight_decay=config['weight_decay'])
+    def __init__(self, root, train=True, transform=None):
+        """
+        Initialize MNIST-M dataset.
 
-    # Train only on source domain
-    for epoch in range(num_epochs):
-        model.train()
-        total_loss = 0.0
-        correct = 0
-        total = 0
+        Args:
+            root: Root directory containing MNIST-M data
+            train: Whether to load training or test set
+            transform: Optional transform to apply
+        """
+        self.root = Path(root)
+        self.train = train
+        self.transform = transform
 
-        # Use tqdm for progress bar
-        with tqdm(source_loader, desc=f"Baseline Epoch {epoch+1}/{num_epochs}", unit="batch") as pbar:
-            for images, labels in pbar:
-                images = images.to(config['device'])
-                labels = labels.to(config['device'])
+        if not self._check_exists():
+            raise RuntimeError('Dataset not found. Please ensure MNIST-M data is available.')
 
-                optimizer.zero_grad()
-                outputs, _ = model(images, lambda_=0.0)  # No domain adaptation
-                loss = criterion(outputs, labels)
+        # Load labels
+        label_file = self.root / ('mnist_m_train_labels.txt' if train else 'mnist_m_test_labels.txt')
+        self.image_folder = self.root / ('mnist_m_train' if train else 'mnist_m_test')
 
-                loss.backward()
+        self.samples = []
+        with open(label_file, 'r') as f:
+            for line in f:
+                img_name, label = line.strip().split()
+                self.samples.append((img_name, int(label)))
 
-                # Gradient clipping to prevent exploding gradients
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+    def _check_exists(self):
+        """Check if dataset files exist."""
+        train_file = self.root / 'mnist_m_train_labels.txt'
+        test_file = self.root / 'mnist_m_test_labels.txt'
+        train_folder = self.root / 'mnist_m_train'
+        test_folder = self.root / 'mnist_m_test'
+        return (train_file.exists() and test_file.exists() and
+                train_folder.exists() and test_folder.exists())
 
-                optimizer.step()
+    def __getitem__(self, index):
+        """Get a single item."""
+        img_name, target = self.samples[index]
+        img_path = self.image_folder / img_name
 
-                total_loss += loss.item()
-                _, predicted = torch.max(outputs, 1)
-                correct += (predicted == labels).sum().item()
-                total += labels.size(0)
+        # Load image
+        img = datasets.folder.pil_loader(img_path)
 
-                # Update progress bar
-                pbar.set_postfix({
-                    'loss': f"{total_loss / (pbar.n + 1):.4f}",
-                    'acc': f"{correct / total:.4f}"
-                })
+        if self.transform is not None:
+            img = self.transform(img)
 
-        print(f"Baseline Epoch {epoch+1}/{num_epochs}: Loss={total_loss/len(source_loader):.4f}, Acc={correct/total:.4f}")
+        return img, target
 
-    return model
+    def __len__(self):
+        """Return dataset size."""
+        return len(self.samples)
 
 
-def main():
-    """Main training function."""
+# ============================================
+# Data Loading Functions
+# ============================================
+def get_mnist_loaders(batch_size=64, image_size=28):
+    """
+    Get MNIST data loaders.
 
-    print("🚀 Domain Adaptation: MNIST → MNIST-M")
-    print("=" * 50)
+    Args:
+        batch_size: Batch size for data loading
+        image_size: Image size (should be 28 for MNIST)
 
-    # Auto-detect best available device
-    if torch.cuda.is_available():
-        device = 'cuda'
-        print("🎮 Using CUDA GPU")
-    else:
-        # Try MPS even if is_available() returns False (sometimes works in restricted environments)
-        # try:
-        #     test_device = torch.device('mps')
-        #     # Test if MPS actually works by creating a small tensor
-        #     test_tensor = torch.randn(1, device=test_device)
-        #     device = 'mps'
-        #     print("🍎 Using Apple Silicon MPS (tested and working)")
-        # except Exception as e:
-        #     device = 'cpu'
-        #     print(f"💻 Using CPU (MPS not available: {str(e)[:50]}...)")
-        device = 'cpu'
-        
-    # Check if this is a quick test run
-    import sys
-    quick_test = '--quick' in sys.argv
-
-    # Create timestamped experiment directory in models_minst
-    from datetime import datetime
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    save_dir = f'./models_minst/model_dann_{timestamp}'
-
-    config = {
-        'batch_size': 256 if quick_test else 128,  # Larger batch for quick test
-        'num_epochs': 2 if quick_test else 20,     # Quick test or full training
-        'learning_rate': 1e-3,
-        'weight_decay': 1e-4,
-        'zeta': 1.0,  # Maximum adaptation strength (try 1.0, 2.0, 3.0 for stronger GRL)
-        'device': device,
-        'save_dir': save_dir,
-        'experiment_name': f'model_dann_{timestamp}',
-        'timestamp': timestamp
-    }
-
-    # Create save directory first
-    os.makedirs(config['save_dir'], exist_ok=True)
-
-    # Setup logging
-    logger = setup_logging(config['save_dir'], config['experiment_name'])
-
-    logger.info(f"Using device: {config['device']}")
-    logger.info(f"Configuration: {config}")
-
-    # Data transforms for MNIST (grayscale)
-    mnist_transform = transforms.Compose([
+    Returns:
+        train_loader, test_loader: DataLoaders for MNIST
+    """
+    # Data transforms
+    transform = transforms.Compose([
+        transforms.Resize(image_size),
+        transforms.Grayscale(3),  # Convert to 3 channels for consistency with MNIST-M
         transforms.ToTensor(),
-        transforms.Normalize((0.1307,), (0.3081,))  # MNIST mean and std
+        transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))
     ])
 
-    # Data transforms for MNIST-M (RGB)
-    # Note: Images are already resized to 28x28 during dataset loading
-    mnist_m_transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))  # Standard RGB normalization
-    ])
+    # Load MNIST dataset (use local data if available, download otherwise)
+    train_dataset = datasets.MNIST(
+        root='./data',
+        train=True,
+        download=True,
+        transform=transform
+    )
 
-    # Create real MNIST and MNIST-M datasets
-    logger.info("📦 Loading real MNIST and MNIST-M datasets...")
-
-    # Set max_samples for quick testing
-    max_samples = 200 if quick_test else None
-
-    # Source domain: MNIST (grayscale)
-    source_train_dataset = MNISTDataset('./data', train=True, transform=mnist_transform, max_samples=max_samples)
-    source_test_dataset = MNISTDataset('./data', train=False, transform=mnist_transform, max_samples=max_samples)
-
-    # Target domain: MNIST-M (color)
-    target_train_dataset = MNISTMDataset('./data', train=True, transform=mnist_m_transform, max_samples=max_samples)
-    target_test_dataset = MNISTMDataset('./data', train=False, transform=mnist_m_transform, max_samples=max_samples)
+    test_dataset = datasets.MNIST(
+        root='./data',
+        train=False,
+        download=True,
+        transform=transform
+    )
 
     # Create data loaders
-    source_loader = DataLoader(source_train_dataset, batch_size=config['batch_size'], shuffle=True)
-    target_loader = DataLoader(target_train_dataset, batch_size=config['batch_size'], shuffle=True)
+    train_loader = DataLoader(
+        dataset=train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=2
+    )
 
-    mnist_test_loader = DataLoader(source_test_dataset, batch_size=config['batch_size'], shuffle=False)
-    mnist_m_test_loader = DataLoader(target_test_dataset, batch_size=config['batch_size'], shuffle=False)
+    test_loader = DataLoader(
+        dataset=test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=2
+    )
 
-    logger.info(f"MNIST train: {len(source_train_dataset)} samples")
-    logger.info(f"MNIST-M train: {len(target_train_dataset)} samples")
-    logger.info(f"MNIST test: {len(source_test_dataset)} samples")
-    logger.info(f"MNIST-M test: {len(target_test_dataset)} samples")
+    return train_loader, test_loader
+
+
+def get_mnistm_loaders(batch_size=64, image_size=28):
+    """
+    Get MNIST-M data loaders.
+
+    Args:
+        batch_size: Batch size for data loading
+        image_size: Image size (should be 28 for MNIST-M)
+
+    Returns:
+        train_loader, test_loader: DataLoaders for MNIST-M
+    """
+    # Data transforms (same as MNIST)
+    transform = transforms.Compose([
+        transforms.Resize(image_size),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))
+    ])
+
+    # Load MNIST-M dataset (using local data in domain_adapt/data)
+    train_dataset = MNISTM(
+        root='./data/mnist_m',
+        train=True,
+        transform=transform
+    )
+
+    test_dataset = MNISTM(
+        root='./data/mnist_m',
+        train=False,
+        transform=transform
+    )
+
+    # Create data loaders
+    train_loader = DataLoader(
+        dataset=train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=2
+    )
+
+    test_loader = DataLoader(
+        dataset=test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=2
+    )
+
+    return train_loader, test_loader
+
+
+# ============================================
+# Training and Evaluation Functions
+# ============================================
+def train_dann_epoch(model, source_loader, target_loader, optimizer,
+                    loss_class, loss_domain, device, epoch, n_epoch):
+    """
+    Train DANN for one epoch.
+
+    Args:
+        model: CNNModel instance
+        source_loader: DataLoader for source domain (MNIST)
+        target_loader: DataLoader for target domain (MNIST-M)
+        optimizer: Optimizer
+        loss_class: Classification loss function
+        loss_domain: Domain classification loss function
+        device: Device (CPU/CUDA)
+        epoch: Current epoch number
+        n_epoch: Total number of epochs
+
+    Returns:
+        Average losses for the epoch
+    """
+    model.train()
+
+    # Calculate lambda (adaptation strength) using schedule from DANN paper
+    len_dataloader = min(len(source_loader), len(target_loader))
+    total_batches = len_dataloader * n_epoch
+
+    # Create iterators
+    data_source_iter = iter(source_loader)
+    data_target_iter = iter(target_loader)
+
+    total_class_loss = 0.0
+    total_domain_loss = 0.0
+    n_batches = 0
+
+    for batch_idx in range(len_dataloader):
+        # Calculate progress p and lambda
+        p = float(batch_idx + epoch * len_dataloader) / total_batches
+        alpha = 2. / (1. + np.exp(-10 * p)) - 1
+
+        # ============================================
+        # Train on source data (MNIST)
+        # ============================================
+        try:
+            source_data = next(data_source_iter)
+        except StopIteration:
+            data_source_iter = iter(source_loader)
+            source_data = next(data_source_iter)
+
+        s_img, s_label = source_data
+        batch_size = len(s_label)
+
+        # Move to device
+        s_img = s_img.to(device)
+        s_label = s_label.to(device)
+
+        # Convert grayscale MNIST to RGB (3 channels)
+        if s_img.shape[1] == 1:
+            s_img = s_img.repeat(1, 3, 1, 1)
+
+        # Forward pass
+        model.zero_grad()
+        class_output, domain_output = model(s_img, alpha)
+
+        # Classification loss (digit classification)
+        err_s_label = loss_class(class_output, s_label)
+
+        # Domain loss (source domain = 0)
+        domain_label = torch.zeros(batch_size).long().to(device)
+        err_s_domain = loss_domain(domain_output, domain_label)
+
+        # ============================================
+        # Train on target data (MNIST-M)
+        # ============================================
+        try:
+            target_data = next(data_target_iter)
+        except StopIteration:
+            data_target_iter = iter(target_loader)
+            target_data = next(data_target_iter)
+
+        t_img, _ = target_data
+        batch_size = len(t_img)
+
+        # Move to device
+        t_img = t_img.to(device)
+
+        # Forward pass (only domain classification for target)
+        _, domain_output = model(t_img, alpha)
+
+        # Domain loss (target domain = 1)
+        domain_label = torch.ones(batch_size).long().to(device)
+        err_t_domain = loss_domain(domain_output, domain_label)
+
+        # Total loss
+        err = err_s_label + err_s_domain + err_t_domain
+        err.backward()
+        optimizer.step()
+
+        # Track losses
+        total_class_loss += err_s_label.item()
+        total_domain_loss += (err_s_domain.item() + err_t_domain.item())
+        n_batches += 1
+
+        if (batch_idx + 1) % 50 == 0:
+            print(f'Epoch: {epoch+1}, Batch: {batch_idx+1}/{len_dataloader}, '
+                  f'Class Loss: {err_s_label.item():.4f}, Domain Loss: {(err_s_domain + err_t_domain).item():.4f}, '
+                  f'Lambda: {alpha:.4f}')
+
+    # Return average losses
+    avg_class_loss = total_class_loss / n_batches
+    avg_domain_loss = total_domain_loss / n_batches
+
+    return avg_class_loss, avg_domain_loss
+
+
+def test_model(model, test_loader, device, domain_name="test"):
+    """
+    Test model on a dataset.
+
+    Args:
+        model: CNNModel instance
+        test_loader: DataLoader for test data
+        device: Device (CPU/CUDA)
+        domain_name: Name for logging
+
+    Returns:
+        Accuracy on the test set
+    """
+    model.eval()
+
+    n_total = 0
+    n_correct = 0
+
+    with torch.no_grad():
+        for data in test_loader:
+            img, label = data
+            batch_size = len(label)
+
+            # Move to device
+            img = img.to(device)
+            label = label.to(device)
+
+            # Convert grayscale to RGB if needed
+            if img.shape[1] == 1:
+                img = img.repeat(1, 3, 1, 1)
+
+            # Forward pass (alpha=0 for inference)
+            class_output, _ = model(img, alpha=0)
+
+            # Get predictions
+            pred = class_output.data.max(1, keepdim=True)[1]
+            n_correct += pred.eq(label.data.view_as(pred)).cpu().sum().item()
+            n_total += batch_size
+
+    accuracy = n_correct * 1.0 / n_total
+    print(f'Accuracy on {domain_name}: {accuracy:.4f}')
+
+    return accuracy
+
+
+# ============================================
+# Main Training Function
+# ============================================
+def train_dann(source_name='mnist', target_name='mnist_m', n_epoch=100,
+               batch_size=64, lr=1e-3, save_interval=10):
+    """
+    Train DANN model for MNIST → MNIST-M adaptation.
+
+    Args:
+        source_name: Source domain name ('mnist')
+        target_name: Target domain name ('mnist_m')
+        n_epoch: Number of training epochs
+        batch_size: Batch size
+        lr: Learning rate
+        save_interval: Save model every N epochs
+    """
+    print("=" * 70)
+    print("DOMAIN ADVERSARIAL NEURAL NETWORK (DANN)")
+    print(f"Source: {source_name.upper()} → Target: {target_name.upper()}")
+    print("=" * 70)
+
+    # Set random seeds for reproducibility
+    random.seed(42)
+    torch.manual_seed(42)
+    np.random.seed(42)
+
+    # Set device
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
+
+    # Load data
+    print("\nLoading data...")
+    if source_name == 'mnist':
+        source_train_loader, source_test_loader = get_mnist_loaders(batch_size=batch_size)
+    else:
+        raise ValueError(f"Unsupported source domain: {source_name}")
+
+    if target_name == 'mnist_m':
+        target_train_loader, target_test_loader = get_mnistm_loaders(batch_size=batch_size)
+    else:
+        raise ValueError(f"Unsupported target domain: {target_name}")
+
+    print(f"Source train size: {len(source_train_loader.dataset)}")
+    print(f"Target train size: {len(target_train_loader.dataset)}")
 
     # Create model
-    logger.info("🏗️ Creating DANN model...")
-    model = MNISTDANN(num_classes=10)
-    model.to(config['device'])
+    model = CNNModel()
+    print(f"\nModel parameters: {sum(p.numel() for p in model.parameters()):,}")
 
-    # Loss functions
-    criterion_label = nn.CrossEntropyLoss()
-    criterion_domain = nn.BCEWithLogitsLoss()  # Binary classification for domain (1 output unit with sigmoid)
+    # Setup optimizer and loss functions
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+    loss_class = nn.NLLLoss()
+    loss_domain = nn.NLLLoss()
 
-    # Optimizer (using Adam for better convergence)
-    optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'],
-                          weight_decay=config['weight_decay'])
+    # Move to device
+    model = model.to(device)
+    loss_class = loss_class.to(device)
+    loss_domain = loss_domain.to(device)
 
-    # Adam optimizer handles learning rate adaptively - no manual scheduling needed
-
-    # Training history
-    history = []
-
-    # Train and evaluate baseline model (skip by default for faster DANN testing)
-    skip_baseline = True  # Set to False to run baseline training
-    if skip_baseline:
-        logger.info("\n⏭️  Skipping baseline training (set skip_baseline=False to enable)")
-        baseline_mnist_acc = 0.0
-        baseline_mnist_m_acc = 0.0
-    else:
-        logger.info("\n🔍 Establishing Baseline...")
-        baseline_model = train_baseline(source_loader, target_loader, config, num_epochs=5)
-        baseline_mnist_acc, baseline_mnist_loss = evaluate(baseline_model, mnist_test_loader, config['device'], "MNIST (baseline)", criterion_label)
-        baseline_mnist_m_acc, baseline_mnist_m_loss = evaluate(baseline_model, mnist_m_test_loader, config['device'], "MNIST-M (baseline)", criterion_label)
-
-    logger.info(f"Baseline MNIST-M Accuracy: {baseline_mnist_m_acc:.4f}")
-    # Evaluate before training DANN
-    logger.info("\n📊 Pre-training DANN evaluation:")
-    mnist_acc_before, mnist_loss_before = evaluate(model, mnist_test_loader, config['device'], "MNIST (before DANN)", criterion_label)
-    mnist_m_acc_before, mnist_m_loss_before = evaluate(model, mnist_m_test_loader, config['device'], "MNIST-M (before DANN)", criterion_label)
+    # Create model directory
+    model_dir = Path('./models')
+    model_dir.mkdir(exist_ok=True)
 
     # Training loop
-    logger.info("\n🎯 Starting DANN training...")
-    logger.info(f"Training for {config['num_epochs']} epochs")
-    for epoch in range(config['num_epochs']):
-        logger.debug(f"Starting epoch {epoch+1}")
+    print("\nStarting training...")
+    best_source_acc = 0.0
+    best_target_acc = 0.0
 
-        # Train one epoch
-        epoch_stats = train_epoch(
-            model, source_loader, target_loader,
-            optimizer, criterion_label, criterion_domain,
-            config['device'], epoch, config['num_epochs'], config
+    for epoch in range(n_epoch):
+        print(f"\nEpoch {epoch+1}/{n_epoch}")
+        print("-" * 50)
+
+        # Train for one epoch
+        class_loss, domain_loss = train_dann_epoch(
+            model, source_train_loader, target_train_loader,
+            optimizer, loss_class, loss_domain, device, epoch, n_epoch
         )
 
-        # Adam optimizer handles learning rate adaptively
+        # Test on both domains
+        source_acc = test_model(model, source_test_loader, device, f"{source_name} test")
+        target_acc = test_model(model, target_test_loader, device, f"{target_name} test")
 
-        # Evaluate on test sets
-        mnist_acc, mnist_loss = evaluate(model, mnist_test_loader, config['device'], f"MNIST (epoch {epoch+1})", criterion_label)
-        mnist_m_acc, mnist_m_loss = evaluate(model, mnist_m_test_loader, config['device'], f"MNIST-M (epoch {epoch+1})", criterion_label)
+        # Save best models
+        if source_acc > best_source_acc:
+            best_source_acc = source_acc
+            torch.save(model.state_dict(), model_dir / 'best_source_model.pth')
 
-        # Store results
-        epoch_result = {
-            **epoch_stats,
-            'epoch': epoch + 1,
-            'mnist_test_acc': mnist_acc,
-            'mnist_test_loss': mnist_loss,
-            'mnist_m_test_acc': mnist_m_acc,
-            'mnist_m_test_loss': mnist_m_loss,
-            'learning_rate': optimizer.param_groups[0]['lr']
-        }
-        history.append(epoch_result)
+        if target_acc > best_target_acc:
+            best_target_acc = target_acc
+            torch.save(model.state_dict(), model_dir / 'best_target_model.pth')
 
-        current_lr = optimizer.param_groups[0]['lr']
-        current_lambda = epoch_stats['lambda']
-        logger.info(f"Epoch {epoch+1}: Label Loss={epoch_stats['label_loss']:.4f}, "
-                    f"Label Acc={epoch_stats['label_accuracy']:.4f}, "
-                    f"Domain Loss={epoch_stats['domain_loss']:.4f}, "
-                    f"Domain Acc={epoch_stats['domain_accuracy']:.4f}, "
-                    f"Lambda={current_lambda:.4f}, "
-                    f"LR={current_lr:.6f}, "
-                    f"MNIST-M Acc={mnist_m_acc:.4f}")
+        # Save model periodically
+        if (epoch + 1) % save_interval == 0:
+            torch.save(model.state_dict(), model_dir / f'model_epoch_{epoch+1}.pth')
 
-    # Final evaluation
-    logger.info("\n🏁 Final evaluation:")
-    mnist_acc_final, mnist_loss_final = evaluate(model, mnist_test_loader, config['device'], "MNIST (final)", criterion_label)
-    mnist_m_acc_final, mnist_m_loss_final = evaluate(model, mnist_m_test_loader, config['device'], "MNIST-M (final)", criterion_label)
+        print(".4f"
+              ".4f"
+              ".4f")
 
-    # Save results
-    results = {
-        'config': config,
-        'history': history,
-        'final_results': {
-            'mnist_accuracy': mnist_acc_final,
-            'mnist_m_accuracy': mnist_m_acc_final,
-            'improvement': mnist_m_acc_final - baseline_mnist_m_acc if not skip_baseline else None
-        }
-    }
-
-    torch.save(results, os.path.join(config['save_dir'], 'mnist_dann_results.pth'))
-    logger.info(f"\n💾 Results saved to {config['save_dir']}/mnist_dann_results.pth")
-
-    # Save trained model
-    model_path = os.path.join(config['save_dir'], 'dann_model.pth')
-    torch.save({
-        'model_state_dict': model.state_dict(),
-        'config': config,
-        'final_mnist_accuracy': mnist_acc_final,
-        'final_mnist_m_accuracy': mnist_m_acc_final
-    }, model_path)
-    logger.info(f"💾 Model saved to {model_path}")
-
-    # Plot and save loss curves
-    plot_training_losses(history, config['save_dir'], logger)
-
-    # Print training summary
-    logger.info("\n📈 Training Summary:")
-    logger.info("Epoch | Label Loss | Label Acc | Domain Loss | Domain Acc | MNIST Test | MNIST-M Test | Lambda | LR")
-    logger.info("-" * 100)
-    for h in history:
-        logger.info(f"{h['epoch']:>3d}   | {h['label_loss']:>8.4f}   | {h['label_accuracy']:>8.4f}   | {h['domain_loss']:>10.4f}   | {h['domain_accuracy']:>9.4f}   | {h['mnist_test_acc']:>9.4f}   | {h['mnist_m_test_acc']:>10.4f}   | {h['lambda']:>5.3f}   | {h['learning_rate']:>6.6f}")
-
-    # Save baseline results
-    results['baseline_results'] = {
-        'mnist_accuracy': baseline_mnist_acc,
-        'mnist_m_accuracy': baseline_mnist_m_acc
-    }
-
-    logger.info("\n" + "="*60)
-    logger.info("🎉 DOMAIN ADAPTATION RESULTS")
-    logger.info("="*60)
-
-    if not skip_baseline:
-        logger.info("BASELINE (No Domain Adaptation):")
-        logger.info(f"  MNIST:     {results['baseline_results']['mnist_accuracy']:.4f}")
-        logger.info(f"  MNIST-M:   {results['baseline_results']['mnist_m_accuracy']:.4f}")
-        logger.info("")
-
-    logger.info("DANN (Domain Adversarial Neural Network):")
-    logger.info(f"  MNIST:     {results['final_results']['mnist_accuracy']:.4f}")
-    logger.info(f"  MNIST-M:   {results['final_results']['mnist_m_accuracy']:.4f}")
-
-    if not skip_baseline and results['final_results']['improvement'] is not None:
-        logger.info("IMPROVEMENT:")
-        logger.info(f"  MNIST-M:   {results['final_results']['improvement']:.4f}")
-
-    # Domain adaptation effectiveness (only if baseline was run)
-    if not skip_baseline and results['final_results']['improvement'] is not None:
-        dann_improvement = results['final_results']['improvement']
-        if dann_improvement > 0.05:  # 5% improvement threshold
-            logger.info("✅ EXCELLENT: Strong domain adaptation effect!")
-        elif dann_improvement > 0.02:  # 2% improvement threshold
-            logger.info("✅ GOOD: Domain adaptation is working!")
-        elif dann_improvement > 0:
-            logger.info("⚠️  MARGINAL: Slight improvement, may need tuning")
-        else:
-            logger.info("❌ FAILURE: No domain adaptation benefit")
-    else:
-        logger.info("ℹ️  Baseline training skipped - cannot evaluate improvement")
-
-    # Overall performance
-    final_acc = results['final_results']['mnist_m_accuracy']
-    if final_acc > 0.85:
-        logger.info("✅ HIGH ACCURACY: Model performs well on target domain")
-    elif final_acc > 0.75:
-        logger.info("✅ DECENT ACCURACY: Acceptable performance")
-    else:
-        logger.info("⚠️  LOW ACCURACY: May need more training or architecture changes")
-
-    logger.info(f"\n💾 All results and model saved to: {config['save_dir']}")
-    logger.info("Files saved:")
-    logger.info(f"  - Results: mnist_dann_results.pth")
-    logger.info(f"  - Model: dann_model.pth")
-    logger.info(f"  - Loss plots: dann_training_losses.png, dann_adversarial_dynamics.png")
-    logger.info(f"  - Logs: {config['experiment_name']}.log")
+    print("\n" + "=" * 70)
+    print("TRAINING COMPLETED")
+    print(".4f")
+    print(".4f")
+    print("=" * 70)
 
 
 if __name__ == "__main__":
-    main()
+    train_dann(n_epoch=2, batch_size=32)  # Quick test run

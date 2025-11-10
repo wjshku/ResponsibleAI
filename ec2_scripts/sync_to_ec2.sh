@@ -6,6 +6,8 @@
 
 set -e
 
+# SSH retry function removed for debugging
+
 # ============================================
 # Load EC2 configuration
 # ============================================
@@ -81,6 +83,7 @@ rsync -avz --progress \
     --exclude='__pycache__' \
     --exclude='.git' \
     --exclude='models/' \
+    --exclude='models_minst/' \
     --exclude='train_dann.py' \
     --exclude='mnist_dann.py' \
     --exclude='model_dann.py' \
@@ -111,6 +114,7 @@ rsync -avz --progress \
     --exclude='__pycache__' \
     --exclude='.git' \
     --exclude='models/' \
+    --exclude='models_minst/' \
     -e "ssh -i \"$EC2_KEY_PATH\" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR" \
     simple_detect_car/*.py \
     "$EC2_SSH_USER@$EC2_PUBLIC_IP":~/ResponsibleAI/simple_detect_car/
@@ -119,123 +123,148 @@ echo "✓ Dependencies synced"
 echo ""
 
 # ============================================
-# Sync data
+# PART 1: Upload CarDD Dataset
 # ============================================
 echo "======================================================================"
-echo "SYNCING DATA"
+echo "PART 1: SYNCING CarDD DATASET"
 echo "======================================================================"
+echo "This includes original CarDD-TE, CarDD-TR, and CarDD-VAL images and masks"
 echo ""
 
 # Ensure directories exist on EC2
 echo "Creating directory structure on EC2..."
 ssh -i "$EC2_KEY_PATH" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$EC2_SSH_USER@$EC2_PUBLIC_IP" << 'EOFMKDIR'
-mkdir -p ~/ResponsibleAI/cardd_data/GenAI_Results/SD2/CarDD-{TE,TR,VAL}
-mkdir -p ~/ResponsibleAI/cardd_data/GenAI_Results/Kontext/CarDD-{TE,TR,VAL}
 mkdir -p ~/ResponsibleAI/CarDD_release/CarDD_SOD/CarDD-TE/CarDD-TE-{Image,Mask}
 mkdir -p ~/ResponsibleAI/CarDD_release/CarDD_SOD/CarDD-TR/CarDD-TR-{Image,Mask}
 mkdir -p ~/ResponsibleAI/CarDD_release/CarDD_SOD/CarDD-VAL/CarDD-VAL-{Image,Mask}
-mkdir -p ~/ResponsibleAI/domain_adapt/data/mnist_m
 EOFMKDIR
-echo "✓ Directories created"
+echo "✓ CarDD directories created"
 echo ""
 
-# Check if data already synced
-echo "Checking existing data on EC2..."
-DATA_STATUS=$(ssh -i "$EC2_KEY_PATH" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$EC2_SSH_USER@$EC2_PUBLIC_IP" << 'EOFCHECK'
-ORIG_IMGS=$(find ~/ResponsibleAI/CarDD_release/CarDD_SOD -type f \( -name "*.jpg" -o -name "*.png" \) -path "*/Image/*" 2>/dev/null | wc -l)
-MASKS=$(find ~/ResponsibleAI/CarDD_release/CarDD_SOD -type f -path "*/Mask/*" 2>/dev/null | wc -l)
-SD2_JSON=$(find ~/ResponsibleAI/cardd_data/GenAI_Results/SD2 -name "*.json" 2>/dev/null | wc -l)
-SD2_IMG=$(find ~/ResponsibleAI/cardd_data/GenAI_Results/SD2 \( -name "*.png" -o -name "*.jpg" \) 2>/dev/null | wc -l)
-KONTEXT_JSON=$(find ~/ResponsibleAI/cardd_data/GenAI_Results/Kontext -name "*.json" 2>/dev/null | wc -l)
-KONTEXT_IMG=$(find ~/ResponsibleAI/cardd_data/GenAI_Results/Kontext \( -name "*.png" -o -name "*.jpg" \) 2>/dev/null | wc -l)
-echo "$ORIG_IMGS $MASKS $SD2_JSON $SD2_IMG $KONTEXT_JSON $KONTEXT_IMG"
-EOFCHECK
-)
-
-read -r ORIG_COUNT MASK_COUNT SD2_JSON_COUNT SD2_IMG_COUNT KONTEXT_JSON_COUNT KONTEXT_IMG_COUNT <<< "$DATA_STATUS"
-
-echo "Current data on EC2:"
-echo "  Original images: $ORIG_COUNT (expected: 4,010 from TE+TR+VAL)"
-echo "  Masks: $MASK_COUNT (expected: 4,010)"
-echo "  SD2 metadata: $SD2_JSON_COUNT, images: $SD2_IMG_COUNT (expected: ~4,375)"
-echo "  Kontext metadata: $KONTEXT_JSON_COUNT, images: $KONTEXT_IMG_COUNT (expected: ~4,000)"
+# Ask user if they want to upload CarDD dataset
+read -p "Upload CarDD dataset (original TE/TR/VAL images & masks)? (y/n) " -n 1 -r
+echo
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+    UPLOAD_CARDD=true
+    echo "✓ Will upload CarDD dataset"
+else
+    UPLOAD_CARDD=false
+    echo "⏭️  Skipping CarDD dataset upload"
+fi
 echo ""
 
-if [ "$SD2_IMG_COUNT" -gt "4000" ] && [ "$KONTEXT_IMG_COUNT" -gt "3500" ]; then
-    echo "Data appears to be synced"
-    read -p "Re-sync all data? (y/n) " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        echo "Skipping data sync"
-        DATA_SYNC_SKIPPED=true
-    fi
+# ============================================
+# PART 2: Upload SD2 and Kontext Dataset
+# ============================================
+echo "======================================================================"
+echo "PART 2: SYNCING SD2 & KONTEKT DATASET"
+echo "======================================================================"
+echo "This includes processed/fake images and metadata (with path adjustments)"
+echo ""
+
+# Ensure directories exist on EC2 for SD2/Kontext
+echo "Creating SD2/Kontext directory structure on EC2..."
+ssh -i "$EC2_KEY_PATH" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$EC2_SSH_USER@$EC2_PUBLIC_IP" << 'EOFMKDIR2'
+mkdir -p ~/ResponsibleAI/cardd_data/GenAI_Results/SD2/CarDD-{TE,TR,VAL}
+mkdir -p ~/ResponsibleAI/cardd_data/GenAI_Results/Kontext/CarDD-{TE,TR,VAL}
+EOFMKDIR2
+echo "✓ SD2/Kontext directories created"
+echo ""
+
+# Ask user if they want to upload SD2/Kontext dataset
+read -p "Upload SD2 & Kontext dataset (processed images + metadata)? (y/n) " -n 1 -r
+echo
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+    UPLOAD_SD2_KONTEXT=true
+    echo "✓ Will upload SD2 & Kontext dataset"
+else
+    UPLOAD_SD2_KONTEXT=false
+    echo "⏭️  Skipping SD2 & Kontext dataset upload"
+fi
+echo ""
+
+# ============================================
+# PART 3: Upload MNIST/MNIST-M Dataset
+# ============================================
+echo "======================================================================"
+echo "PART 3: SYNCING MNIST/MNIST-M DATASET"
+echo "======================================================================"
+echo "This includes MNIST-M images and labels for domain adaptation training"
+echo ""
+
+# Ensure directories exist on EC2 for MNIST-M
+echo "Creating MNIST-M directory structure on EC2..."
+ssh -i "$EC2_KEY_PATH" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$EC2_SSH_USER@$EC2_PUBLIC_IP" << 'EOFMKDIR3'
+mkdir -p ~/ResponsibleAI/domain_adapt/data/mnist_m
+EOFMKDIR3
+echo "✓ MNIST-M directories created"
+echo ""
+
+# Ask user if they want to upload MNIST/MNIST-M dataset
+read -p "Upload MNIST/MNIST-M dataset (images + labels)? (y/n) " -n 1 -r
+echo
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+    UPLOAD_MNIST=true
+    echo "✓ Will upload MNIST/MNIST-M dataset"
+else
+    UPLOAD_MNIST=false
+    echo "⏭️  Skipping MNIST/MNIST-M dataset upload"
+fi
+echo ""
+
+# ============================================
+# Execute uploads based on user choices
+# ============================================
+
+# Check existing data status if any uploads are enabled
+if [ "$UPLOAD_CARDD" = "true" ] || [ "$UPLOAD_SD2_KONTEXT" = "true" ]; then
+    echo "Checking existing data on EC2..."
+    DATA_STATUS=$(ssh -i "$EC2_KEY_PATH" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$EC2_SSH_USER@$EC2_PUBLIC_IP" << 'EOFCHECK'
+    ORIG_IMGS=$(find ~/ResponsibleAI/CarDD_release/CarDD_SOD -type f \( -name "*.jpg" -o -name "*.png" \) -path "*/Image/*" 2>/dev/null | wc -l)
+    MASKS=$(find ~/ResponsibleAI/CarDD_release/CarDD_SOD -type f -path "*/Mask/*" 2>/dev/null | wc -l)
+    SD2_JSON=$(find ~/ResponsibleAI/cardd_data/GenAI_Results/SD2 -name "*.json" 2>/dev/null | wc -l)
+    SD2_IMG=$(find ~/ResponsibleAI/cardd_data/GenAI_Results/SD2 \( -name "*.png" -o -name "*.jpg" \) 2>/dev/null | wc -l)
+    KONTEXT_JSON=$(find ~/ResponsibleAI/cardd_data/GenAI_Results/Kontext -name "*.json" 2>/dev/null | wc -l)
+    KONTEXT_IMG=$(find ~/ResponsibleAI/cardd_data/GenAI_Results/Kontext \( -name "*.png" -o -name "*.jpg" \) 2>/dev/null | wc -l)
+    echo "$ORIG_IMGS $MASKS $SD2_JSON $SD2_IMG $KONTEXT_JSON $KONTEXT_IMG"
+    EOFCHECK
+    )
+
+    read -r ORIG_COUNT MASK_COUNT SD2_JSON_COUNT SD2_IMG_COUNT KONTEXT_JSON_COUNT KONTEXT_IMG_COUNT <<< "$DATA_STATUS"
+
+    echo "Current data on EC2:"
+    echo "  CarDD images: $ORIG_COUNT (expected: 4,010 from TE+TR+VAL)"
+    echo "  CarDD masks: $MASK_COUNT (expected: 4,010)"
+    echo "  SD2 metadata: $SD2_JSON_COUNT, images: $SD2_IMG_COUNT (expected: ~4,375)"
+    echo "  Kontext metadata: $KONTEXT_JSON_COUNT, images: $KONTEXT_IMG_COUNT (expected: ~4,000)"
+    echo ""
 fi
 
-if [ "$DATA_SYNC_SKIPPED" != "true" ]; then
+# ============================================
+# PART 1 EXECUTION: CarDD Dataset
+# ============================================
+if [ "$UPLOAD_CARDD" = "true" ]; then
     echo "======================================================================"
-    echo "STEP 1: Syncing metadata files"
-    echo "======================================================================"
-
-    # Check if metadata needs syncing
-    METADATA_SKIP=false
-    if [ "$SD2_JSON_COUNT" -gt "4000" ] && [ "$KONTEXT_JSON_COUNT" -gt "3500" ]; then
-        echo "Metadata appears to be synced:"
-        echo "  SD2: $SD2_JSON_COUNT files (expected ~4,383)"
-        echo "  Kontext: $KONTEXT_JSON_COUNT files (expected ~4,003)"
-        read -p "Re-sync metadata? (y/n) " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            echo "Skipping metadata sync"
-            METADATA_SKIP=true
-        fi
-    fi
-
-    if [ "$METADATA_SKIP" != "true" ]; then
-        echo "Syncing SD2 metadata (~4,383 JSON files: 375 TE + 3,192 TR + 816 VAL)..."
-        rsync -avz --progress \
-            --include="*/" \
-            --include="*.json" \
-            --exclude="*" \
-            -e "ssh -i \"$EC2_KEY_PATH\" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR" \
-            cardd_data/GenAI_Results/SD2/ \
-            "$EC2_SSH_USER@$EC2_PUBLIC_IP":~/ResponsibleAI/cardd_data/GenAI_Results/SD2/
-        echo "✓ SD2 metadata synced"
-        echo ""
-
-        echo "Syncing Kontext metadata (~4,003 JSON files: 375 TE + 2,817 TR + 811 VAL)..."
-        rsync -avz --progress \
-            --include="*/" \
-            --include="*.json" \
-            --exclude="*" \
-            -e "ssh -i \"$EC2_KEY_PATH\" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR" \
-            cardd_data/GenAI_Results/Kontext/ \
-            "$EC2_SSH_USER@$EC2_PUBLIC_IP":~/ResponsibleAI/cardd_data/GenAI_Results/Kontext/
-        echo "✓ Kontext metadata synced"
-        echo ""
-    else
-        echo "✓ Metadata sync skipped"
-        echo ""
-    fi
-
-    echo "======================================================================"
-    echo "STEP 2: Syncing original CarDD images & masks"
+    echo "EXECUTING PART 1: SYNCING CarDD DATASET"
     echo "======================================================================"
 
-    # Check if original data needs syncing
-    ORIGINAL_SKIP=false
+    # Check if CarDD data needs syncing
     if [ "$ORIG_COUNT" -gt "3800" ] && [ "$MASK_COUNT" -gt "3800" ]; then
-        echo "Original images/masks appear to be synced:"
+        echo "CarDD data appears to be synced - skipping automatically"
+        CARDD_SKIP=true
+    else
+        echo "CarDD data appears incomplete:"
         echo "  Images: $ORIG_COUNT (expected 4,010)"
         echo "  Masks: $MASK_COUNT (expected 4,010)"
-        read -p "Re-sync original data? (y/n) " -n 1 -r
+        read -p "Re-sync CarDD data? (y/n) " -n 1 -r
         echo
         if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            echo "Skipping original data sync"
-            ORIGINAL_SKIP=true
+            echo "Skipping CarDD data sync"
+            CARDD_SKIP=true
         fi
     fi
 
-    if [ "$ORIGINAL_SKIP" != "true" ]; then
+    if [ "$CARDD_SKIP" != "true" ]; then
         echo "Syncing CarDD-TE images (374 JPG files)..."
 rsync -avz --progress \
     -e "ssh -i \"$EC2_KEY_PATH\" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR" \
@@ -284,81 +313,81 @@ rsync -avz --progress \
         echo "✓ CarDD-VAL masks synced"
         echo ""
     else
-    echo "✓ Original data sync skipped"
-    echo ""
+        echo "✓ CarDD data sync skipped"
+        echo ""
     fi
+else
+    echo "⏭️  CarDD dataset upload skipped"
+    echo ""
+fi
 
 # ============================================
-# Sync MNIST-M data (for MNIST DANN training)
+# PART 2 EXECUTION: SD2 & Kontext Dataset
 # ============================================
-echo "======================================================================"
-echo "STEP 2.5: SYNCING MNIST-M DATA"
-echo "======================================================================"
+if [ "$UPLOAD_SD2_KONTEXT" = "true" ]; then
+    echo "======================================================================"
+    echo "EXECUTING PART 2: SYNCING SD2 & KONTEKT DATASET"
+    echo "======================================================================"
 
-# Check if MNIST-M data exists locally
-if [ -d "domain_adapt/data/mnist_m" ] || [ -d "data/mnist_m" ]; then
-    MNIST_M_LOCAL=""
-    if [ -d "domain_adapt/data/mnist_m" ]; then
-        MNIST_M_LOCAL="domain_adapt/data/mnist_m"
-    elif [ -d "data/mnist_m" ]; then
-        MNIST_M_LOCAL="data/mnist_m"
-    fi
+    # STEP 2.1: Sync metadata files
+    echo "======================================================================"
+    echo "STEP 2.1: SYNCING METADATA FILES"
+    echo "======================================================================"
 
-    echo "Checking existing MNIST-M data on EC2..."
-    MNIST_M_STATUS=$(ssh -i "$EC2_KEY_PATH" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$EC2_SSH_USER@$EC2_PUBLIC_IP" << 'MNIST_EOF'
-TRAIN_IMGS=$(find ~/ResponsibleAI/domain_adapt/data/mnist_m -path "*/mnist_m_train/*" -type f 2>/dev/null | wc -l)
-TEST_IMGS=$(find ~/ResponsibleAI/domain_adapt/data/mnist_m -path "*/mnist_m_test/*" -type f 2>/dev/null | wc -l)
-TRAIN_LABELS=$(find ~/ResponsibleAI/domain_adapt/data/mnist_m -name "mnist_m_train_labels.txt" 2>/dev/null | wc -l)
-TEST_LABELS=$(find ~/ResponsibleAI/domain_adapt/data/mnist_m -name "mnist_m_test_labels.txt" 2>/dev/null | wc -l)
-echo "$TRAIN_IMGS $TEST_IMGS $TRAIN_LABELS $TEST_LABELS"
-MNIST_EOF
-    )
-
-    read -r TRAIN_IMG_COUNT TEST_IMG_COUNT TRAIN_LABEL_COUNT TEST_LABEL_COUNT <<< "$MNIST_M_STATUS"
-
-    echo "Current MNIST-M data on EC2:"
-    echo "  Train images: $TRAIN_IMG_COUNT"
-    echo "  Test images: $TEST_IMG_COUNT"
-    echo "  Train labels: $TRAIN_LABEL_COUNT"
-    echo "  Test labels: $TEST_LABEL_COUNT"
-    echo ""
-
-    if [ "$TRAIN_IMG_COUNT" -gt "50000" ] && [ "$TEST_IMG_COUNT" -gt "8000" ] && [ "$TRAIN_LABEL_COUNT" -eq "1" ] && [ "$TEST_LABEL_COUNT" -eq "1" ]; then
-        echo "MNIST-M data appears to be synced"
-        read -p "Re-sync MNIST-M data? (y/n) " -n 1 -r
+    # Check if metadata needs syncing
+    if [ "$SD2_JSON_COUNT" -gt "4000" ] && [ "$KONTEXT_JSON_COUNT" -gt "3500" ]; then
+        echo "Metadata appears to be synced - skipping automatically"
+        METADATA_SKIP=true
+    else
+        echo "Metadata appears incomplete:"
+        echo "  SD2: $SD2_JSON_COUNT files (expected ~4,383)"
+        echo "  Kontext: $KONTEXT_JSON_COUNT files (expected ~4,003)"
+        read -p "Re-sync metadata? (y/n) " -n 1 -r
         echo
         if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            echo "Skipping MNIST-M data sync"
-            MNIST_M_SYNC_SKIPPED=true
+            echo "Skipping metadata sync"
+            METADATA_SKIP=true
         fi
     fi
 
-    if [ "$MNIST_M_SYNC_SKIPPED" != "true" ]; then
-        echo "Syncing MNIST-M data..."
-        rsync -avz --timeout=300 --compress --partial \
-            -e "ssh -i \"$EC2_KEY_PATH\" -o ServerAliveInterval=60 -o ServerAliveCountMax=10" \
-            "$MNIST_M_LOCAL/" \
-            "$EC2_SSH_USER@$EC2_PUBLIC_IP":~/ResponsibleAI/domain_adapt/data/mnist_m/
-        echo "✓ MNIST-M data synced"
-    else
-        echo "✓ MNIST-M data sync skipped"
-    fi
-else
-    echo "⚠️  MNIST-M data not found locally"
-    echo "   Expected location: domain_adapt/data/mnist_m"
-    echo "   MNIST-M data will be downloaded automatically by mnist_dann.py"
-    echo "   (MNIST dataset downloads automatically via torchvision)"
-fi
-echo ""
+    if [ "$METADATA_SKIP" != "true" ]; then
+        echo "Syncing SD2 metadata (~4,383 JSON files: 375 TE + 3,192 TR + 816 VAL)..."
+        rsync -avz --progress \
+            --include="*/" \
+            --include="*.json" \
+            --exclude="*" \
+            -e "ssh -i \"$EC2_KEY_PATH\" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR" \
+            cardd_data/GenAI_Results/SD2/ \
+            "$EC2_SSH_USER@$EC2_PUBLIC_IP":~/ResponsibleAI/cardd_data/GenAI_Results/SD2/
+        echo "✓ SD2 metadata synced"
+        echo ""
 
+        echo "Syncing Kontext metadata (~4,003 JSON files: 375 TE + 2,817 TR + 811 VAL)..."
+        rsync -avz --progress \
+            --include="*/" \
+            --include="*.json" \
+            --exclude="*" \
+            -e "ssh -i \"$EC2_KEY_PATH\" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR" \
+            cardd_data/GenAI_Results/Kontext/ \
+            "$EC2_SSH_USER@$EC2_PUBLIC_IP":~/ResponsibleAI/cardd_data/GenAI_Results/Kontext/
+        echo "✓ Kontext metadata synced"
+        echo ""
+    else
+        echo "✓ Metadata sync skipped"
+        echo ""
+    fi
+
+    # STEP 2.2: Sync processed/fake images
     echo "======================================================================"
-    echo "STEP 3: Syncing processed/fake images"
+    echo "STEP 2.2: SYNCING PROCESSED/FAKE IMAGES"
     echo "======================================================================"
 
     # Check if processed images need syncing
-    PROCESSED_SKIP=false
     if [ "$SD2_IMG_COUNT" -gt "4000" ] && [ "$KONTEXT_IMG_COUNT" -gt "3500" ]; then
-        echo "Processed images appear to be synced:"
+        echo "Processed images appear to be synced - skipping automatically"
+        PROCESSED_SKIP=true
+    else
+        echo "Processed images appear incomplete:"
         echo "  SD2: $SD2_IMG_COUNT (expected ~4,375)"
         echo "  Kontext: $KONTEXT_IMG_COUNT (expected ~4,000)"
         read -p "Re-sync processed images? (y/n) " -n 1 -r
@@ -397,39 +426,109 @@ echo ""
         echo "✓ Processed images sync skipped"
         echo ""
     fi
-
-    echo "✓ All data synced"
+else
+    echo "⏭️  SD2 & Kontext dataset upload skipped"
+    echo ""
 fi
+
+# ============================================
+# PART 3 EXECUTION: MNIST/MNIST-M Dataset
+# ============================================
+if [ "$UPLOAD_MNIST" = "true" ]; then
+    echo "======================================================================"
+    echo "EXECUTING PART 3: SYNCING MNIST/MNIST-M DATASET"
+    echo "======================================================================"
+
+    # Check if MNIST-M data exists locally
+    if [ -d "domain_adapt/data/mnist_m" ] || [ -d "data/mnist_m" ]; then
+        MNIST_M_LOCAL=""
+        if [ -d "domain_adapt/data/mnist_m" ]; then
+            MNIST_M_LOCAL="domain_adapt/data/mnist_m"
+        elif [ -d "data/mnist_m" ]; then
+            MNIST_M_LOCAL="data/mnist_m"
+        fi
+
+        echo "Checking existing MNIST-M data on EC2..."
+        # Use a more robust SSH command with explicit script execution
+        sleep 2
+        MNIST_M_STATUS=$(ssh -i "$EC2_KEY_PATH" -o ConnectTimeout=15 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$EC2_SSH_USER@$EC2_PUBLIC_IP" "
+        TRAIN_IMGS=\$(find ~/ResponsibleAI/domain_adapt/data/mnist_m -path '*/mnist_m_train/*' -type f 2>/dev/null | wc -l)
+        TEST_IMGS=\$(find ~/ResponsibleAI/domain_adapt/data/mnist_m -path '*/mnist_m_test/*' -type f 2>/dev/null | wc -l)
+        TRAIN_LABELS=\$(find ~/ResponsibleAI/domain_adapt/data/mnist_m -name 'mnist_m_train_labels.txt' 2>/dev/null | wc -l)
+        TEST_LABELS=\$(find ~/ResponsibleAI/domain_adapt/data/mnist_m -name 'mnist_m_test_labels.txt' 2>/dev/null | wc -l)
+        echo \"\$TRAIN_IMGS \$TEST_IMGS \$TRAIN_LABELS \$TEST_LABELS\"
+        ")
+
+        read -r TRAIN_IMG_COUNT TEST_IMG_COUNT TRAIN_LABEL_COUNT TEST_LABEL_COUNT <<< "$MNIST_M_STATUS"
+
+        echo "Current MNIST-M data on EC2:"
+        echo "  Train images: $TRAIN_IMG_COUNT"
+        echo "  Test images: $TEST_IMG_COUNT"
+        echo "  Train labels: $TRAIN_LABEL_COUNT"
+        echo "  Test labels: $TEST_LABEL_COUNT"
+        echo ""
+
+        if [ "$TRAIN_IMG_COUNT" -gt "50000" ] && [ "$TEST_IMG_COUNT" -gt "8000" ] && [ "$TRAIN_LABEL_COUNT" -eq "1" ] && [ "$TEST_LABEL_COUNT" -eq "1" ]; then
+            echo "MNIST-M data appears to be synced - skipping automatically"
+            MNIST_M_SYNC_SKIPPED=true
+        else
+            echo "MNIST-M data appears incomplete:"
+            echo "  Expected: 59,001 train images, 9,001 test images, 1 train label file, 1 test label file"
+            read -p "Re-sync MNIST-M data? (y/n) " -n 1 -r
+            echo
+            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                echo "Skipping MNIST-M data sync"
+                MNIST_M_SYNC_SKIPPED=true
+            fi
+        fi
+
+        if [ "$MNIST_M_SYNC_SKIPPED" != "true" ]; then
+            echo "Syncing MNIST-M data..."
+            rsync -avz --timeout=300 --compress --partial \
+                -e "ssh -i \"$EC2_KEY_PATH\" -o ServerAliveInterval=60 -o ServerAliveCountMax=10" \
+                "$MNIST_M_LOCAL/" \
+                "$EC2_SSH_USER@$EC2_PUBLIC_IP":~/ResponsibleAI/domain_adapt/data/mnist_m/
+            echo "✓ MNIST-M data synced"
+        else
+            echo "✓ MNIST-M data sync skipped"
+        fi
+    else
+        echo "⚠️  MNIST-M data not found locally"
+        echo "   Expected location: domain_adapt/data/mnist_m"
+        echo "   MNIST-M data will be downloaded automatically by mnist_dann.py"
+        echo "   (MNIST dataset downloads automatically via torchvision)"
+    fi
+else
+    echo "⏭️  MNIST/MNIST-M dataset upload skipped"
+fi
+echo ""
 echo ""
 
 # ============================================
-# Update paths in code and metadata
+# Update metadata paths (only if SD2/Kontext was uploaded)
 # ============================================
-echo "======================================================================"
-echo "UPDATING FILE PATHS"
-echo "======================================================================"
+if [ "$UPLOAD_SD2_KONTEXT" = "true" ] && [ "$METADATA_SKIP" != "true" ]; then
+    echo "======================================================================"
+    echo "UPDATING METADATA FILE PATHS"
+    echo "======================================================================"
 
-ssh -i "$EC2_KEY_PATH" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$EC2_SSH_USER@$EC2_PUBLIC_IP" << 'EOF'
-cd ~/ResponsibleAI/domain_adapt
+    ssh -i "$EC2_KEY_PATH" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$EC2_SSH_USER@$EC2_PUBLIC_IP" << 'EOF'
+    cd ~/ResponsibleAI/cardd_data/GenAI_Results
 
-echo "✓ Code uses relative paths, no path updates needed"
+    echo "Updating metadata file paths..."
+    # Update SD2 metadata
+    find SD2 -name "processing_*.json" -type f | while read file; do
+        sed -i 's|/Users/wjs/Local Storage/CarDD_release|/home/ubuntu/ResponsibleAI/CarDD_release|g' "$file"
+    done
 
-# Update paths in metadata files
-echo "Updating metadata file paths..."
-cd ~/ResponsibleAI/cardd_data/GenAI_Results
+    # Update Kontext metadata
+    find Kontext -name "processing_*.json" -type f | while read file; do
+        sed -i 's|/Users/wjs/Local Storage/CarDD_release|/home/ubuntu/ResponsibleAI/CarDD_release|g' "$file"
+    done
 
-# Update SD2 metadata
-find SD2 -name "processing_*.json" -type f | while read file; do
-    sed -i 's|/Users/wjs/Local Storage/CarDD_release|/home/ubuntu/ResponsibleAI/CarDD_release|g' "$file"
-done
-
-# Update Kontext metadata
-find Kontext -name "processing_*.json" -type f | while read file; do
-    sed -i 's|/Users/wjs/Local Storage/CarDD_release|/home/ubuntu/ResponsibleAI/CarDD_release|g' "$file"
-done
-
-echo "✓ Metadata paths updated"
-EOF
+    echo "✓ Metadata paths updated"
+    EOF
+fi
 
 echo ""
 

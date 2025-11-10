@@ -64,9 +64,10 @@ fi
 echo ""
 echo "Select training type to download:"
 echo "  [1] DANN (domain_adapt)"
-echo "  [2] Simple Detect CNN/MLP (simple_detect_car)"
+echo "  [2] MNIST DANN (domain_adapt/models_minst)"
+echo "  [3] Simple Detect CNN/MLP (simple_detect_car)"
 echo ""
-read -p "Choose [1-2]: " -n 1 -r TRAINING_TYPE
+read -p "Choose [1-3]: " -n 1 -r TRAINING_TYPE
 echo ""
 
 case $TRAINING_TYPE in
@@ -75,6 +76,11 @@ case $TRAINING_TYPE in
         MODEL_PATTERN="model_dann_*"
         ;;
     2)
+        TRAINING_DIR="domain_adapt"
+        MODEL_SUBDIR="models_minst"
+        MODEL_PATTERN="model_dann_*"
+        ;;
+    3)
         TRAINING_DIR="simple_detect_car"
         MODEL_PATTERN="model_*"
         ;;
@@ -88,19 +94,30 @@ esac
 # List available models
 # ============================================
 echo ""
-echo "======================================================================"
-echo "AVAILABLE MODELS ($TRAINING_DIR)"
-echo "======================================================================"
+if [ -n "$MODEL_SUBDIR" ]; then
+    echo "======================================================================"
+    echo "AVAILABLE MODELS ($TRAINING_DIR/$MODEL_SUBDIR)"
+    echo "======================================================================"
+else
+    echo "======================================================================"
+    echo "AVAILABLE MODELS ($TRAINING_DIR)"
+    echo "======================================================================"
+fi
 
 MODEL_LIST=$(ssh -q -o LogLevel=ERROR -i "$EC2_KEY_PATH" "$EC2_SSH_USER@$EC2_PUBLIC_IP" << EOF
 cd ~/ResponsibleAI/$TRAINING_DIR 2>/dev/null || { echo "ERROR: Directory not found"; exit 1; }
 
-if [ ! -d "models" ]; then
-    echo "ERROR: No models directory found"
+MODEL_BASE_DIR="models"
+if [ -n "$MODEL_SUBDIR" ]; then
+    MODEL_BASE_DIR="$MODEL_SUBDIR"
+fi
+
+if [ ! -d "\$MODEL_BASE_DIR" ]; then
+    echo "ERROR: No \$MODEL_BASE_DIR directory found"
     exit 1
 fi
 
-MODEL_DIRS=\$(find models -maxdepth 1 -type d -name "$MODEL_PATTERN" 2>/dev/null | sort -r)
+MODEL_DIRS=\$(find \$MODEL_BASE_DIR -maxdepth 1 -type d -name "$MODEL_PATTERN" 2>/dev/null | sort -r)
 
 if [ -z "\$MODEL_DIRS" ]; then
     echo "ERROR: No trained models found"
@@ -112,7 +129,7 @@ EOF
 )
 
 # Filter to only show model paths (ignore SSH banner)
-MODEL_LIST=$(echo "$MODEL_LIST" | grep "^models/" || echo "$MODEL_LIST" | grep "^ERROR:")
+MODEL_LIST=$(echo "$MODEL_LIST" | grep "^models" || echo "$MODEL_LIST" | grep "^ERROR:")
 
 if [[ "$MODEL_LIST" == ERROR:* ]]; then
     echo "❌ ${MODEL_LIST#ERROR: }"
@@ -137,10 +154,18 @@ echo "DOWNLOADING MODELS"
 echo "======================================================================"
 
 # Determine local download directory
-if [ "$TRAINING_TYPE" == "1" ]; then
+if [ "$TRAINING_TYPE" == "1" ] || [ "$TRAINING_TYPE" == "2" ]; then
     LOCAL_DIR="$SCRIPT_DIR/../domain_adapt"  # domain_adapt
 else
     LOCAL_DIR="$SCRIPT_DIR/../simple_detect_car"  # simple_detect_car
+fi
+
+# Determine remote and local model directories
+REMOTE_MODEL_DIR="models"
+LOCAL_MODEL_DIR="models"
+if [ -n "$MODEL_SUBDIR" ]; then
+    REMOTE_MODEL_DIR="$MODEL_SUBDIR"
+    LOCAL_MODEL_DIR="$MODEL_SUBDIR"
 fi
 
 cd "$LOCAL_DIR"
@@ -150,13 +175,13 @@ case $MODEL_CHOICE in
         echo "Downloading all models..."
         rsync -avz --progress \
             -e "ssh -i \"$EC2_KEY_PATH\"" \
-            "$EC2_SSH_USER@$EC2_PUBLIC_IP":~/ResponsibleAI/$TRAINING_DIR/models/ \
-            ./models/
+            "$EC2_SSH_USER@$EC2_PUBLIC_IP":~/ResponsibleAI/$TRAINING_DIR/$REMOTE_MODEL_DIR/ \
+            ./$LOCAL_MODEL_DIR/
         ;;
     latest|1)
         echo "Downloading latest model..."
         LATEST_MODEL=$(ssh -q -o LogLevel=ERROR -i "$EC2_KEY_PATH" "$EC2_SSH_USER@$EC2_PUBLIC_IP" \
-            "cd ~/ResponsibleAI/$TRAINING_DIR && find models -maxdepth 1 -type d -name '$MODEL_PATTERN' | sort -r | head -1")
+            "cd ~/ResponsibleAI/$TRAINING_DIR && find $REMOTE_MODEL_DIR -maxdepth 1 -type d -name '$MODEL_PATTERN' | sort -r | head -1")
 
         if [ -z "$LATEST_MODEL" ]; then
             echo "❌ No models found"
@@ -167,12 +192,12 @@ case $MODEL_CHOICE in
         rsync -avz --progress \
             -e "ssh -i \"$EC2_KEY_PATH\"" \
             "$EC2_SSH_USER@$EC2_PUBLIC_IP":~/ResponsibleAI/$TRAINING_DIR/$LATEST_MODEL/ \
-            ./$LATEST_MODEL/
+            ./$LOCAL_MODEL_DIR/$(basename "$LATEST_MODEL")/
         ;;
     [0-9]*)
         # Download specific model by number
         SELECTED_MODEL=$(ssh -q -o LogLevel=ERROR -i "$EC2_KEY_PATH" "$EC2_SSH_USER@$EC2_PUBLIC_IP" \
-            "cd ~/ResponsibleAI/$TRAINING_DIR && find models -maxdepth 1 -type d -name '$MODEL_PATTERN' | sort -r | sed -n '${MODEL_CHOICE}p'")
+            "cd ~/ResponsibleAI/$TRAINING_DIR && find $REMOTE_MODEL_DIR -maxdepth 1 -type d -name '$MODEL_PATTERN' | sort -r | sed -n '${MODEL_CHOICE}p'")
 
         if [ -z "$SELECTED_MODEL" ]; then
             echo "❌ Invalid model number"
@@ -183,7 +208,7 @@ case $MODEL_CHOICE in
         rsync -avz --progress \
             -e "ssh -i \"$EC2_KEY_PATH\"" \
             "$EC2_SSH_USER@$EC2_PUBLIC_IP":~/ResponsibleAI/$TRAINING_DIR/$SELECTED_MODEL/ \
-            ./$SELECTED_MODEL/
+            ./$LOCAL_MODEL_DIR/$(basename "$SELECTED_MODEL")/
         ;;
     *)
         echo "❌ Invalid choice"
@@ -207,7 +232,7 @@ echo "TRAINING SUMMARY"
 echo "======================================================================"
 
 # Find the downloaded model
-DOWNLOADED_MODEL=$(find ./models -maxdepth 1 -type d -name "$MODEL_PATTERN" | sort -r | head -1)
+DOWNLOADED_MODEL=$(find ./$LOCAL_MODEL_DIR -maxdepth 1 -type d -name "$MODEL_PATTERN" | sort -r | head -1)
 
 if [ -n "$DOWNLOADED_MODEL" ] && [ -f "$DOWNLOADED_MODEL/metadata.json" ]; then
     echo ""
@@ -230,8 +255,8 @@ print(f"  Image size: {config.get('target_size', 'N/A')}")
 print(f"")
 
 # Display results based on model type
-if '$TRAINING_TYPE' == '1':
-    # DANN model
+if '$TRAINING_TYPE' == '1' or '$TRAINING_TYPE' == '2':
+    # DANN or MNIST DANN model
     best_acc = metadata.get('best_target_accuracy', 'N/A')
     best_epoch = metadata.get('best_epoch', 'N/A')
     print(f"Results:")
