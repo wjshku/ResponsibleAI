@@ -503,59 +503,6 @@ def train_dann_epoch(model, source_loader, target_loader, optimizer,
 
     return avg_class_loss, avg_domain_loss, label_accuracy, domain_accuracy, src_domain_accuracy, tgt_domain_accuracy
 
-
-def test_model(model, test_loader, device, domain_name="test"):
-    """
-    Test model on a dataset.
-
-    Args:
-        model: CNNModel instance
-        test_loader: DataLoader for test data
-        device: Device (CPU/CUDA)
-        domain_name: Name for logging
-
-    Returns:
-        Accuracy on the test set
-    """
-    model.eval()
-
-    n_total = 0
-    n_correct = 0
-
-    with torch.no_grad():
-        pbar = tqdm(test_loader, desc=f'Evaluating {domain_name}', leave=False, unit='batch')
-        for data in pbar:
-            img, label = data
-            batch_size = len(label)
-
-            # Move to device
-            img = img.to(device)
-            label = label.to(device)
-
-            # Convert grayscale to RGB if needed
-            if img.shape[1] == 1:
-                img = img.repeat(1, 3, 1, 1)
-
-            # Forward pass (alpha=0 for inference)
-            class_output, _ = model(img, alpha=0)
-
-            # Get predictions
-            pred = class_output.data.max(1, keepdim=True)[1]
-            n_correct += pred.eq(label.data.view_as(pred)).cpu().sum().item()
-            n_total += batch_size
-
-            # Update progress bar with current accuracy
-            current_acc = n_correct / n_total if n_total > 0 else 0.0
-            pbar.set_postfix({'Accuracy': f'{current_acc:.4f}'})
-
-        pbar.close()
-
-    accuracy = n_correct * 1.0 / n_total
-    print(f'Final accuracy on {domain_name}: {accuracy:.4f}')
-
-    return accuracy
-
-
 # ============================================
 # Main Training Function
 # ============================================

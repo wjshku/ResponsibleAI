@@ -3,6 +3,7 @@
 # Sync Code and Data to EC2
 # ============================================
 # This script transfers your code and data to the EC2 instance
+# IMPORTANT: Model files (*.pth, *.h5, *.pkl, *.joblib) and model directories are excluded
 
 set -e
 
@@ -78,12 +79,19 @@ echo ""
 echo "Syncing remaining domain_adapt code..."
 rsync -avz --progress \
     --exclude='*.pth' \
+    --exclude='*.h5' \
+    --exclude='*.pkl' \
+    --exclude='*.joblib' \
     --exclude='*.png' \
     --exclude='*.pdf' \
     --exclude='__pycache__' \
     --exclude='.git' \
     --exclude='models/' \
     --exclude='models_minst/' \
+    --exclude='models*/' \
+    --exclude='**/models/' \
+    --exclude='**/models_minst/' \
+    --exclude='**/models_mnist/' \
     --exclude='train_dann.py' \
     --exclude='mnist_dann.py' \
     --exclude='model_dann.py' \
@@ -111,10 +119,18 @@ echo ""
 echo "Syncing simple_detect_car dependencies..."
 rsync -avz --progress \
     --exclude='*.pth' \
+    --exclude='*.h5' \
+    --exclude='*.pkl' \
+    --exclude='*.joblib' \
     --exclude='__pycache__' \
     --exclude='.git' \
     --exclude='models/' \
     --exclude='models_minst/' \
+    --exclude='models_mnist/' \
+    --exclude='models*/' \
+    --exclude='**/models/' \
+    --exclude='**/models_minst/' \
+    --exclude='**/models_mnist/' \
     -e "ssh -i \"$EC2_KEY_PATH\" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR" \
     simple_detect_car/*.py \
     "$EC2_SSH_USER@$EC2_PUBLIC_IP":~/ResponsibleAI/simple_detect_car/
