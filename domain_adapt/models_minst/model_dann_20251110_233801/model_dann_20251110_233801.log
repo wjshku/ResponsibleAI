@@ -1,0 +1,23 @@
+2025-11-10 23:38:01,800 - INFO - Starting experiment: model_dann_20251110_233801
+2025-11-10 23:38:01,800 - INFO - Results will be saved to: ./models_minst/model_dann_20251110_233801
+2025-11-10 23:38:01,800 - INFO - Using device: cpu
+2025-11-10 23:38:01,800 - INFO - Configuration: {'batch_size': 128, 'num_epochs': 20, 'learning_rate': 0.001, 'weight_decay': 0.0001, 'zeta': 1.0, 'image_size': 28, 'device': 'cpu', 'save_dir': './models_minst/model_dann_20251110_233801', 'experiment_name': 'model_dann_20251110_233801', 'timestamp': '20251110_233801'}
+2025-11-10 23:38:01,800 - INFO - 📦 Loading real MNIST and MNIST-M datasets...
+2025-11-10 23:38:18,955 - INFO - MNIST train: 60000 samples
+2025-11-10 23:38:18,955 - INFO - MNIST-M train: 59001 samples
+2025-11-10 23:38:18,955 - INFO - MNIST test: 10000 samples
+2025-11-10 23:38:18,955 - INFO - MNIST-M test: 9001 samples
+2025-11-10 23:38:18,955 - INFO - 🏗️ Creating DANN model...
+2025-11-10 23:38:18,959 - INFO - 
+⏭️  Skipping baseline training (set skip_baseline=False to enable)
+2025-11-10 23:38:18,959 - INFO - Baseline MNIST-M Accuracy: 0.0000
+2025-11-10 23:38:18,959 - INFO - 
+📊 Pre-training DANN evaluation:
+2025-11-10 23:38:21,970 - INFO - 
+🎯 Starting DANN training...
+2025-11-10 23:38:21,970 - INFO - Training for 20 epochs
+2025-11-10 23:39:25,037 - INFO - Epoch 1: Label Loss=0.3644, Label Acc=0.8872, Domain Loss=1.4025, Domain Acc=0.7965, Lambda=0.2444, LR=0.001000, MNIST-M Acc=0.4852
+2025-11-10 23:40:29,026 - INFO - Epoch 2: Label Loss=0.1378, Label Acc=0.9579, Domain Loss=0.6700, Domain Acc=0.8646, Lambda=0.4617, LR=0.001000, MNIST-M Acc=0.5461
+2025-11-10 23:41:33,377 - INFO - Epoch 3: Label Loss=0.1650, Label Acc=0.9493, Domain Loss=0.9238, Domain Acc=0.8160, Lambda=0.6348, LR=0.001000, MNIST-M Acc=0.5715
+2025-11-10 23:42:37,581 - INFO - Epoch 4: Label Loss=0.1474, Label Acc=0.9543, Domain Loss=0.6289, Domain Acc=0.8739, Lambda=0.7614, LR=0.001000, MNIST-M Acc=0.5144
+2025-11-10 23:43:40,998 - INFO - Epoch 5: Label Loss=0.2087, Label Acc=0.9374, Domain Loss=0.7618, Domain Acc=0.8761, Lambda=0.8481, LR=0.001000, MNIST-M Acc=0.5404

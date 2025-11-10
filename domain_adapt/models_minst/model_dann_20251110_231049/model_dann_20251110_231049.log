@@ -1,0 +1,16 @@
+2025-11-10 23:10:49,062 - INFO - Starting experiment: model_dann_20251110_231049
+2025-11-10 23:10:49,062 - INFO - Results will be saved to: ./models_minst/model_dann_20251110_231049
+2025-11-10 23:10:49,062 - INFO - Using device: cpu
+2025-11-10 23:10:49,062 - INFO - Configuration: {'batch_size': 128, 'num_epochs': 20, 'learning_rate': 0.001, 'weight_decay': 0.0001, 'zeta': 1.0, 'image_size': 28, 'device': 'cpu', 'save_dir': './models_minst/model_dann_20251110_231049', 'experiment_name': 'model_dann_20251110_231049', 'timestamp': '20251110_231049'}
+2025-11-10 23:10:49,062 - INFO - 📦 Loading real MNIST and MNIST-M datasets...
+2025-11-10 23:10:49,099 - INFO - MNIST train: 60000 samples
+2025-11-10 23:10:49,099 - INFO - MNIST-M train: 59001 samples
+2025-11-10 23:10:49,099 - INFO - MNIST test: 10000 samples
+2025-11-10 23:10:49,099 - INFO - MNIST-M test: 9001 samples
+2025-11-10 23:10:49,099 - INFO - 🏗️ Creating DANN model...
+2025-11-10 23:10:49,101 - INFO - 
+📊 Pre-training DANN evaluation:
+2025-11-10 23:11:06,244 - INFO - 
+🎯 Starting DANN training...
+2025-11-10 23:11:06,246 - INFO - Training for 20 epochs
+2025-11-10 23:12:33,562 - INFO - Epoch 1: Label Loss=0.3256, Label Acc=0.8972, Domain Loss=1.3691, Domain Acc=0.7946, Lambda=0.2444, LR=0.001000, MNIST-M Acc=0.5807

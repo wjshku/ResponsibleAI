@@ -15,13 +15,12 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms as transforms
+import torchvision.datasets as datasets
 from tqdm import tqdm
 import numpy as np
 from pathlib import Path
 import logging
 from datetime import datetime
-import gzip
-import struct
 
 # Set matplotlib backend to avoid display issues
 import matplotlib
@@ -29,70 +28,6 @@ matplotlib.use('Agg')  # Use non-interactive backend
 import matplotlib.pyplot as plt
 
 # Add current directory to path
-
-
-class MNISTDataset(Dataset):
-    """MNIST dataset loader - loads data from binary files."""
-
-    def __init__(self, root='./data', train=True, transform=None, max_samples=None):
-        self.root = root
-        self.train = train
-        self.transform = transform
-        self.max_samples = max_samples
-
-        # Load MNIST data manually
-        self.data, self.labels = self._load_mnist()
-
-    def _load_mnist(self):
-        """Load MNIST data from binary files."""
-        import os
-
-        # Determine file paths
-        data_split = 'train' if self.train else 't10k'
-        images_file = os.path.join(self.root, 'MNIST', 'raw', f'{data_split}-images-idx3-ubyte')
-        labels_file = os.path.join(self.root, 'MNIST', 'raw', f'{data_split}-labels-idx1-ubyte')
-
-        if not os.path.exists(images_file) or not os.path.exists(labels_file):
-            raise FileNotFoundError(f"MNIST {data_split} data not found. Please ensure MNIST data is downloaded to {self.root}/MNIST/raw/")
-
-        # Load images
-        with open(images_file, 'rb') as f:
-            magic, num_images, rows, cols = struct.unpack('>IIII', f.read(16))
-            images = np.frombuffer(f.read(), dtype=np.uint8).reshape(num_images, rows, cols)
-
-        # Load labels
-        with open(labels_file, 'rb') as f:
-            magic, num_labels = struct.unpack('>II', f.read(8))
-            labels = np.frombuffer(f.read(), dtype=np.uint8)
-
-        # Convert to tensors
-        images = torch.from_numpy(images).float().unsqueeze(1)  # Add channel dimension
-        labels = torch.from_numpy(labels).long()
-
-        # Apply max_samples limit if specified
-        if self.max_samples is not None and len(images) > self.max_samples:
-            indices = torch.randperm(len(images))[:self.max_samples]
-            images = images[indices]
-            labels = labels[indices]
-
-        print(f"✅ Loaded MNIST {'train' if self.train else 'test'}: {len(images)} samples")
-        return images, labels
-
-    def __len__(self):
-        return len(self.labels)
-
-    def __getitem__(self, idx):
-        img, label = self.data[idx], self.labels[idx]
-
-        # Note: images are already tensors, so we skip ToTensor in transform
-        # Only apply normalization if specified
-        if self.transform:
-            # Apply transforms, but skip ToTensor since images are already tensors
-            for t in self.transform.transforms:
-                if not isinstance(t, transforms.ToTensor):
-                    img = t(img)
-
-        return img, label
 
 
 def setup_logging(save_dir, experiment_name):
@@ -245,12 +180,17 @@ class MNISTMDataset(Dataset):
     def __getitem__(self, idx):
         img, label = self.data[idx], self.labels[idx]
 
-        # Note: images are already tensors, so we skip ToTensor in transform
-        # Only apply normalization if specified
+        # Note: images are already tensors, so we handle transforms manually
         if self.transform:
-            # Apply transforms, but skip ToTensor since images are already tensors
             for t in self.transform.transforms:
-                if not isinstance(t, transforms.ToTensor):
+                if isinstance(t, transforms.ToTensor):
+                    # Skip ToTensor since images are already tensors
+                    continue
+                elif isinstance(t, transforms.Normalize):
+                    # Apply normalization directly to tensor
+                    img = t(img)
+                else:
+                    # Apply other transforms normally (like Resize)
                     img = t(img)
 
         return img, label
@@ -296,8 +236,6 @@ class MNISTDANN(nn.Module):
             nn.Flatten()
         )
 
-        # Input adaptation layer for grayscale images
-        self.input_adapter = nn.Conv2d(1, 3, kernel_size=1)  # Convert 1-channel to 3-channel
 
         # Calculate feature dimension: 48 * 7 * 7 = 2352
         self.feature_dim = 48 * 7 * 7
@@ -330,16 +268,13 @@ class MNISTDANN(nn.Module):
         Forward pass.
 
         Args:
-            x: Input images (can be 1-channel grayscale or 3-channel RGB)
+            x: Input images (3-channel RGB)
             lambda_: Adaptation strength
 
         Returns:
             label_output: Digit classification logits
             domain_output: Domain classification logits
         """
-        # Adapt input channels if necessary (grayscale to RGB)
-        if x.size(1) == 1:  # Grayscale input
-            x = self.input_adapter(x)  # Convert to 3-channel
 
         # Extract features
         features = self.feature_extractor(x)
@@ -751,12 +686,44 @@ def main():
     max_samples = 200 if quick_test else None
 
     # Source domain: MNIST (grayscale)
-    source_train_dataset = MNISTDataset('./data', train=True, transform=mnist_transform, max_samples=max_samples)
-    source_test_dataset = MNISTDataset('./data', train=False, transform=mnist_transform, max_samples=max_samples)
+    source_train_dataset = datasets.MNIST(
+        root='./data',
+        train=True,
+        download=True,
+        transform=mnist_transform
+    )
+
+    if max_samples is not None and len(source_train_dataset) > max_samples:
+        from torch.utils.data import Subset
+        indices = torch.randperm(len(source_train_dataset))[:max_samples]
+        source_train_dataset = Subset(source_train_dataset, indices)
+
+    source_test_dataset = datasets.MNIST(
+        root='./data',
+        train=False,
+        download=True,
+        transform=mnist_transform
+    )
+
+    if max_samples is not None and len(source_test_dataset) > max_samples:
+        from torch.utils.data import Subset
+        indices = torch.randperm(len(source_test_dataset))[:max_samples]
+        source_test_dataset = Subset(source_test_dataset, indices)
 
     # Target domain: MNIST-M (color)
-    target_train_dataset = MNISTMDataset('./data', train=True, transform=mnist_m_transform, max_samples=max_samples)
-    target_test_dataset = MNISTMDataset('./data', train=False, transform=mnist_m_transform, max_samples=max_samples)
+    target_train_dataset = MNISTMDataset(
+        root='./data',
+        train=True,
+        transform=mnist_m_transform,
+        max_samples=max_samples
+    )
+
+    target_test_dataset = MNISTMDataset(
+        root='./data',
+        train=False,
+        transform=mnist_m_transform,
+        max_samples=max_samples
+    )
 
     # Create data loaders
     source_loader = DataLoader(source_train_dataset, batch_size=config['batch_size'], shuffle=True)

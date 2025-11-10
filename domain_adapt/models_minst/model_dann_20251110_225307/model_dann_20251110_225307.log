@@ -1,0 +1,15 @@
+2025-11-10 22:53:07,850 - INFO - Starting experiment: model_dann_20251110_225307
+2025-11-10 22:53:07,850 - INFO - Results will be saved to: ./models_minst/model_dann_20251110_225307
+2025-11-10 22:53:07,850 - INFO - Using device: cpu
+2025-11-10 22:53:07,850 - INFO - Configuration: {'batch_size': 128, 'num_epochs': 20, 'learning_rate': 0.001, 'weight_decay': 0.0001, 'zeta': 1.0, 'image_size': 28, 'device': 'cpu', 'save_dir': './models_minst/model_dann_20251110_225307', 'experiment_name': 'model_dann_20251110_225307', 'timestamp': '20251110_225307'}
+2025-11-10 22:53:07,850 - INFO - 📦 Loading real MNIST and MNIST-M datasets...
+2025-11-10 22:53:24,504 - INFO - MNIST train: 60000 samples
+2025-11-10 22:53:24,504 - INFO - MNIST-M train: 59001 samples
+2025-11-10 22:53:24,504 - INFO - MNIST test: 10000 samples
+2025-11-10 22:53:24,504 - INFO - MNIST-M test: 9001 samples
+2025-11-10 22:53:24,504 - INFO - 🏗️ Creating DANN model...
+2025-11-10 22:53:24,508 - INFO - 
+⏭️  Skipping baseline training (set skip_baseline=False to enable)
+2025-11-10 22:53:24,508 - INFO - Baseline MNIST-M Accuracy: 0.0000
+2025-11-10 22:53:24,508 - INFO - 
+📊 Pre-training DANN evaluation:

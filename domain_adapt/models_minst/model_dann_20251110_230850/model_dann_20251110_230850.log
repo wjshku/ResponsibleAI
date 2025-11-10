@@ -1,0 +1,12 @@
+2025-11-10 23:08:50,121 - INFO - Starting experiment: model_dann_20251110_230850
+2025-11-10 23:08:50,121 - INFO - Results will be saved to: ./models_minst/model_dann_20251110_230850
+2025-11-10 23:08:50,121 - INFO - Using device: cpu
+2025-11-10 23:08:50,122 - INFO - Configuration: {'batch_size': 128, 'num_epochs': 20, 'learning_rate': 0.001, 'weight_decay': 0.0001, 'zeta': 1.0, 'image_size': 28, 'device': 'cpu', 'save_dir': './models_minst/model_dann_20251110_230850', 'experiment_name': 'model_dann_20251110_230850', 'timestamp': '20251110_230850'}
+2025-11-10 23:08:50,122 - INFO - 📦 Loading real MNIST and MNIST-M datasets...
+2025-11-10 23:08:50,195 - INFO - MNIST train: 60000 samples
+2025-11-10 23:08:50,195 - INFO - MNIST-M train: 59001 samples
+2025-11-10 23:08:50,195 - INFO - MNIST test: 10000 samples
+2025-11-10 23:08:50,195 - INFO - MNIST-M test: 9001 samples
+2025-11-10 23:08:50,195 - INFO - 🏗️ Creating DANN model...
+2025-11-10 23:08:50,198 - INFO - 
+📊 Pre-training DANN evaluation:
