@@ -340,8 +340,8 @@ def get_mnistm_loaders(batch_size=64, image_size=28):
 # ============================================
 # Training and Evaluation Functions
 # ============================================
-def train_dann_epoch(model, source_loader, target_loader, optimizer,
-                    loss_class, loss_domain, device, epoch, n_epoch):
+def step_dann_epoch(model, source_loader, target_loader, optimizer,
+                    loss_class, loss_domain, device, epoch, n_epoch, mode = 'train'):
     """
     Train DANN for one epoch.
 
@@ -357,9 +357,17 @@ def train_dann_epoch(model, source_loader, target_loader, optimizer,
         n_epoch: Total number of epochs
 
     Returns:
-        Average losses for the epoch
+        avg_src_label_loss: Average source label classification loss
+        avg_tgt_label_loss: Average target label classification loss (monitoring only)
+        avg_domain_loss: Average domain classification loss
+        src_label_accuracy: Source label classification accuracy
+        tgt_label_accuracy: Target label classification accuracy (monitoring only)
+        domain_accuracy: Domain classification accuracy
     """
-    model.train()
+    if mode == 'train':
+        model.train()
+    else:
+        model.eval()
 
     # Calculate lambda (adaptation strength) using schedule from DANN paper
     len_dataloader = min(len(source_loader), len(target_loader))
@@ -369,13 +377,18 @@ def train_dann_epoch(model, source_loader, target_loader, optimizer,
     data_source_iter = iter(source_loader)
     data_target_iter = iter(target_loader)
 
-    total_class_loss = 0.0
-    total_domain_loss = 0.0
     n_batches = 0
 
+    # Loss tracking variables
+    total_src_label_loss = 0.0
+    total_tgt_label_loss = 0.0
+    total_domain_loss = 0.0
+
     # Accuracy tracking variables
-    total_label_correct = 0
-    total_label_samples = 0
+    total_src_label_correct = 0
+    total_src_label_samples = 0
+    total_tgt_label_correct = 0
+    total_tgt_label_samples = 0
     total_src_domain_correct = 0
     total_src_domain_samples = 0
     total_tgt_domain_correct = 0
@@ -391,6 +404,10 @@ def train_dann_epoch(model, source_loader, target_loader, optimizer,
         # Calculate progress p and lambda
         p = float(batch_idx + epoch * len_dataloader) / total_batches
         alpha = 2. / (1. + np.exp(-10 * p)) - 1
+
+        if mode == 'train':
+            # Forward pass
+            model.zero_grad()
 
         # ============================================
         # Train on source data (MNIST)
@@ -412,12 +429,10 @@ def train_dann_epoch(model, source_loader, target_loader, optimizer,
         if s_img.shape[1] == 1:
             s_img = s_img.repeat(1, 3, 1, 1)
 
-        # Forward pass
-        model.zero_grad()
-        class_output, src_domain_output = model(s_img, alpha)
+        src_label_output, src_domain_output = model(s_img, alpha)
 
-        # Classification loss (digit classification)
-        err_s_label = loss_class(class_output, s_label)
+        # Label loss (source domain = 0)
+        err_s_label = loss_class(src_label_output, s_label)
 
         # Domain loss (source domain = 0)
         src_domain_label = torch.zeros(batch_size).long().to(device)
@@ -432,14 +447,18 @@ def train_dann_epoch(model, source_loader, target_loader, optimizer,
             data_target_iter = iter(target_loader)
             target_data = next(data_target_iter)
 
-        t_img, _ = target_data
-        batch_size = len(t_img)
+        t_img, t_label = target_data
+        batch_size = len(t_label)
 
         # Move to device
         t_img = t_img.to(device)
+        t_label = t_label.to(device)
 
-        # Forward pass (only domain classification for target)
-        _, tgt_domain_output = model(t_img, alpha)
+        # Forward pass
+        tgt_label_output, tgt_domain_output = model(t_img, alpha)
+
+        # Label loss (for monitoring only, not part of total loss)
+        err_t_label = loss_class(tgt_label_output, t_label)
 
         # Domain loss (target domain = 1)
         tgt_domain_label = torch.ones(batch_size).long().to(device)
@@ -447,27 +466,35 @@ def train_dann_epoch(model, source_loader, target_loader, optimizer,
 
         # Total loss
         err = err_s_label + err_s_domain + err_t_domain
-        err.backward()
-        optimizer.step()
+        if mode == 'train':
+            err.backward()
+            optimizer.step()
 
         # Track losses
-        total_class_loss += err_s_label.item()
+        total_src_label_loss += err_s_label.item()
+        total_tgt_label_loss += err_t_label.item()
         total_domain_loss += (err_s_domain.item() + err_t_domain.item())
 
         # Track accuracies
-        # Label accuracy (source domain digit classification)
-        class_pred = class_output.data.max(1, keepdim=True)[1].squeeze()
-        label_correct = (class_pred == s_label).sum().item()
-        total_label_correct += label_correct
-        total_label_samples += s_label.size(0)
+        # Label accuracy (source domain)
+        src_label_pred = src_label_output.data.max(1, keepdim=True)[1].squeeze()
+        src_label_correct = (src_label_pred == s_label).sum().item()
+        total_src_label_correct += src_label_correct
+        total_src_label_samples += s_label.size(0)
 
-        # Domain accuracy (source domain: should predict 0)
+        # Label accuracy (target domain)
+        tgt_label_pred = tgt_label_output.data.max(1, keepdim=True)[1].squeeze()
+        tgt_label_correct = (tgt_label_pred == t_label).sum().item()
+        total_tgt_label_correct += tgt_label_correct
+        total_tgt_label_samples += t_label.size(0)
+
+        # Domain accuracy (source domain)
         src_domain_pred = src_domain_output.data.max(1, keepdim=True)[1].squeeze()
         src_domain_correct = (src_domain_pred == src_domain_label).sum().item()
         total_src_domain_correct += src_domain_correct
         total_src_domain_samples += batch_size
 
-        # Domain accuracy (target domain: should predict 1)
+        # Domain accuracy (target domain)
         tgt_domain_pred = tgt_domain_output.data.max(1, keepdim=True)[1].squeeze()
         tgt_domain_correct = (tgt_domain_pred == tgt_domain_label).sum().item()
         total_tgt_domain_correct += tgt_domain_correct
@@ -476,11 +503,11 @@ def train_dann_epoch(model, source_loader, target_loader, optimizer,
         n_batches += 1
 
         # Update progress bar with running average losses
-        running_avg_class_loss = total_class_loss / n_batches
+        running_avg_label_loss = total_src_label_loss / n_batches
         running_avg_domain_loss = total_domain_loss / n_batches
 
         pbar.set_postfix({
-            'Class Loss': f'{running_avg_class_loss:.4f}',
+            'Class Loss': f'{running_avg_label_loss:.4f}',
             'Domain Loss': f'{running_avg_domain_loss:.4f}',
             'λ': f'{alpha:.3f}'
         })
@@ -492,69 +519,16 @@ def train_dann_epoch(model, source_loader, target_loader, optimizer,
     pbar.close()
 
     # Compute final accuracies
-    label_accuracy = total_label_correct / total_label_samples if total_label_samples > 0 else 0.0
-    src_domain_accuracy = total_src_domain_correct / total_src_domain_samples if total_src_domain_samples > 0 else 0.0
-    tgt_domain_accuracy = total_tgt_domain_correct / total_tgt_domain_samples if total_tgt_domain_samples > 0 else 0.0
+    src_label_accuracy = total_src_label_correct / total_src_label_samples if total_src_label_samples > 0 else 0.0
+    tgt_label_accuracy = total_tgt_label_correct / total_tgt_label_samples if total_tgt_label_samples > 0 else 0.0
     domain_accuracy = (total_src_domain_correct + total_tgt_domain_correct) / (total_src_domain_samples + total_tgt_domain_samples) if (total_src_domain_samples + total_tgt_domain_samples) > 0 else 0.0
 
     # Return average losses and accuracies
-    avg_class_loss = total_class_loss / n_batches
+    avg_src_label_loss = total_src_label_loss / n_batches
+    avg_tgt_label_loss = total_tgt_label_loss / n_batches
     avg_domain_loss = total_domain_loss / n_batches
 
-    return avg_class_loss, avg_domain_loss, label_accuracy, domain_accuracy, src_domain_accuracy, tgt_domain_accuracy
-
-
-def test_model(model, test_loader, device, domain_name="test"):
-    """
-    Test model on a dataset.
-
-    Args:
-        model: CNNModel instance
-        test_loader: DataLoader for test data
-        device: Device (CPU/CUDA)
-        domain_name: Name for logging
-
-    Returns:
-        Accuracy on the test set
-    """
-    model.eval()
-
-    n_total = 0
-    n_correct = 0
-
-    with torch.no_grad():
-        pbar = tqdm(test_loader, desc=f'Evaluating {domain_name}', leave=False, unit='batch')
-        for data in pbar:
-            img, label = data
-            batch_size = len(label)
-
-            # Move to device
-            img = img.to(device)
-            label = label.to(device)
-
-            # Convert grayscale to RGB if needed
-            if img.shape[1] == 1:
-                img = img.repeat(1, 3, 1, 1)
-
-            # Forward pass (alpha=0 for inference)
-            class_output, _ = model(img, alpha=0)
-
-            # Get predictions
-            pred = class_output.data.max(1, keepdim=True)[1]
-            n_correct += pred.eq(label.data.view_as(pred)).cpu().sum().item()
-            n_total += batch_size
-
-            # Update progress bar with current accuracy
-            current_acc = n_correct / n_total if n_total > 0 else 0.0
-            pbar.set_postfix({'Accuracy': f'{current_acc:.4f}'})
-
-        pbar.close()
-
-    accuracy = n_correct * 1.0 / n_total
-    print(f'Final accuracy on {domain_name}: {accuracy:.4f}')
-
-    return accuracy
-
+    return avg_src_label_loss, avg_tgt_label_loss, avg_domain_loss, src_label_accuracy, tgt_label_accuracy, domain_accuracy
 
 # ============================================
 # Main Training Function
@@ -635,28 +609,33 @@ def train_dann(source_name='mnist', target_name='mnist_m', n_epoch=100,
         epoch_start_time = time.time()
 
         # Train for one epoch
-        class_loss, domain_loss, label_acc, domain_acc, src_domain_acc, tgt_domain_acc = train_dann_epoch(
+        src_label_loss, tgt_label_loss, domain_loss, src_label_acc, tgt_label_acc, domain_acc = step_dann_epoch(
             model, source_train_loader, target_train_loader,
             optimizer, loss_class, loss_domain, device, epoch, n_epoch
         )
 
-        # Test on both domains
-        source_acc = test_model(model, source_test_loader, device, f"{source_name} test")
-        target_acc = test_model(model, target_test_loader, device, f"{target_name} test")
-
+        # Test for one epoch
+        val_src_label_loss, val_tgt_label_loss, val_domain_loss, val_src_label_acc, val_tgt_label_acc, val_domain_acc = step_dann_epoch(
+            model, source_test_loader, target_test_loader,
+            optimizer, loss_class, loss_domain, device, epoch, n_epoch, 
+            mode = 'eval'
+        )
         epoch_time = time.time() - epoch_start_time
 
         # Update tracker with epoch metrics
         tracker.update_epoch_metrics(
-            label_loss=class_loss,
-            domain_loss=domain_loss,
-            total_loss=class_loss + domain_loss,
-            label_accuracy=label_acc,  # Actual computed accuracy
-            domain_accuracy=domain_acc,  # Actual computed accuracy
-            source_domain_accuracy=src_domain_acc,  # Actual computed accuracy
-            target_domain_accuracy=tgt_domain_acc,  # Actual computed accuracy
-            source_val_accuracy=source_acc,
-            target_val_accuracy=target_acc,
+            train_label_loss=src_label_loss,        # Source label classification loss
+            train_label_target_loss=tgt_label_loss,  # Target label classification loss (monitoring only)
+            train_domain_loss=domain_loss,
+            train_label_source_acc=src_label_acc,  # Training label accuracy (source only)
+            train_label_target_acc=tgt_label_acc,  # In-sample target label accuracy (labels available for monitoring)
+            train_domain_acc=domain_acc,       # Training domain accuracy
+            val_label_source_loss=val_src_label_loss,
+            val_label_target_loss=val_tgt_label_loss,
+            val_label_source_acc=val_src_label_acc,
+            val_label_target_acc=val_tgt_label_acc,
+            val_domain_loss=val_domain_loss,  
+            val_domain_accuracy=val_domain_acc,
             lambda_value=compute_lambda_schedule(epoch, n_epoch, zeta=zeta),
             epoch_time=epoch_time
         )
@@ -666,19 +645,21 @@ def train_dann(source_name='mnist', target_name='mnist_m', n_epoch=100,
         # tracker.track_gradients(model)
 
         # Save best models
-        if source_acc > best_source_acc:
-            best_source_acc = source_acc
+        if val_src_label_acc > best_source_acc:
+            best_source_acc = val_src_label_acc
             torch.save(model.state_dict(), model_dir / 'best_source_model.pth')
 
-        if target_acc > best_target_acc:
-            best_target_acc = target_acc
+        if val_tgt_label_acc > best_target_acc:
+            best_target_acc = val_tgt_label_acc
             torch.save(model.state_dict(), model_dir / 'best_target_model.pth')
 
         # Save model periodically
         if (epoch + 1) % save_interval == 0:
             torch.save(model.state_dict(), model_dir / f'model_epoch_{epoch+1}.pth')
 
-        print(f"Epoch {epoch+1}/{n_epoch} | Source Acc: {source_acc:.4f} | Target Acc: {target_acc:.4f} | Time: {epoch_time:.1f}s")
+        print(f"Epoch {epoch+1}/{n_epoch} | Time: {epoch_time:.1f}s")
+        print(f" | (TRAIN) Source Acc: {src_label_acc:.4f}, Loss: {src_label_loss:.4f} | Target Acc: {tgt_label_acc:.4f}, Loss: {tgt_label_loss:.4f} | Domain Loss: {domain_loss:.4f}")
+        print(f" | (VAL) Source Acc: {val_src_label_acc:.4f}, Loss: {val_src_label_loss:.4f} | Target Acc: {val_tgt_label_acc:.4f}, Loss: {val_tgt_label_loss:.4f} | Domain Loss: {val_domain_loss:.4f}")
 
     print("\n" + "=" * 70)
     print("TRAINING COMPLETED")
@@ -707,4 +688,4 @@ def train_dann(source_name='mnist', target_name='mnist_m', n_epoch=100,
 
 
 if __name__ == "__main__":
-    train_dann(n_epoch=2, batch_size=32)  # Quick test run
+    train_dann(n_epoch=5, batch_size=64)  # Quick test run

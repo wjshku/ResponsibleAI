@@ -52,7 +52,8 @@ def setup_logging(save_dir, experiment_name):
 
 # Add current directory to path
 sys.path.append(str(Path(__file__).parent))
-# We'll define our own components instead of importing from model_dann
+# Import training utilities
+from utils import create_tracker, save_training_summary
 
 # Import torch for loading MNIST-M data
 import torch
@@ -213,12 +214,12 @@ class MNISTDANN(nn.Module):
 
         # Feature extractor (matches DANN paper architecture)
         self.feature_extractor = nn.Sequential()
-        self.feature_extractor.add_module('f_conv1', nn.Conv2d(3, 64, kernel_size=5))
-        self.feature_extractor.add_module('f_bn1', nn.BatchNorm2d(64))
+        self.feature_extractor.add_module('f_conv1', nn.Conv2d(3, 32, kernel_size=5))
+        # self.feature_extractor.add_module('f_bn1', nn.BatchNorm2d(64))
         self.feature_extractor.add_module('f_pool1', nn.MaxPool2d(2))
         self.feature_extractor.add_module('f_relu1', nn.ReLU(True))
-        self.feature_extractor.add_module('f_conv2', nn.Conv2d(64, 50, kernel_size=5))
-        self.feature_extractor.add_module('f_bn2', nn.BatchNorm2d(50))
+        self.feature_extractor.add_module('f_conv2', nn.Conv2d(32, 50, kernel_size=5))
+        # self.feature_extractor.add_module('f_bn2', nn.BatchNorm2d(50))
         self.feature_extractor.add_module('f_drop1', nn.Dropout2d())
         self.feature_extractor.add_module('f_pool2', nn.MaxPool2d(2))
         self.feature_extractor.add_module('f_relu2', nn.ReLU(True))
@@ -231,11 +232,11 @@ class MNISTDANN(nn.Module):
         # Label predictor (digit classification)
         self.label_predictor = nn.Sequential()
         self.label_predictor.add_module('c_fc1', nn.Linear(self.feature_dim, 100))
-        self.label_predictor.add_module('c_bn1', nn.BatchNorm1d(100))
+        # self.label_predictor.add_module('c_bn1', nn.BatchNorm1d(100))
         self.label_predictor.add_module('c_relu1', nn.ReLU(True))
         self.label_predictor.add_module('c_drop1', nn.Dropout())
         self.label_predictor.add_module('c_fc2', nn.Linear(100, 100))
-        self.label_predictor.add_module('c_bn2', nn.BatchNorm1d(100))
+        # self.label_predictor.add_module('c_bn2', nn.BatchNorm1d(100))
         self.label_predictor.add_module('c_relu2', nn.ReLU(True))
         self.label_predictor.add_module('c_fc3', nn.Linear(100, num_classes))
         # Softmax will be applied in loss function (CrossEntropyLoss includes it)
@@ -281,25 +282,21 @@ class MNISTDANN(nn.Module):
 # ============================================
 # Training Functions
 # ============================================
-def compute_lambda_schedule(epoch, total_epochs, gamma=10.0, zeta=1.0):
+def compute_lambda_schedule(p, gamma=10.0, zeta=1.0):
     """
     Compute lambda parameter using schedule from DANN paper.
 
     Lambda gradually increases from 0 to zeta during training following:
         lambda_p = zeta * (2 / (1 + exp(-gamma * p)) - 1)
 
-    where p = epoch / total_epochs (training progress)
-
     Args:
-        epoch: Current epoch (0-indexed)
-        total_epochs: Total number of training epochs
+        p: Training progress (0.0 to 1.0)
         gamma: Sharpness of the schedule (default: 10.0 from paper)
         zeta: Maximum adaptation strength in [0, 1] (default: 1.0)
 
     Returns:
         lambda_p: Adaptation strength in [0, zeta]
     """
-    p = float(epoch) / float(total_epochs)
     lambda_p = zeta * (2.0 / (1.0 + np.exp(-gamma * p)) - 1.0)
     return lambda_p
 
@@ -312,11 +309,13 @@ def train_epoch(model, source_loader, target_loader, optimizer,
     total_label_loss = 0.0
     total_domain_loss = 0.0
     total_label_correct = 0
+    total_target_label_correct = 0
+    total_target_label_samples = 0
     total_domain_correct = 0
-    total_samples = 0
-
-    # Calculate lambda for this epoch (constant throughout epoch)
-    lambda_ = compute_lambda_schedule(epoch, total_epochs)
+    total_source_domain_correct = 0
+    total_target_domain_correct = 0
+    total_source_domain_samples = 0
+    total_target_domain_samples = 0
 
     # Create iterators
     source_iter = iter(source_loader)
@@ -324,11 +323,19 @@ def train_epoch(model, source_loader, target_loader, optimizer,
 
     # Train until shorter dataset is exhausted
     num_batches = min(len(source_loader), len(target_loader))
+    total_batches = total_epochs * num_batches
 
     pbar = tqdm(range(num_batches), desc=f"Epoch {epoch+1}/{total_epochs}")
-    pbar.set_postfix({'λ': f'{lambda_:.3f}'})
+    # Lambda will be updated per batch
 
     for batch_idx in pbar:
+
+        # Calculate lambda for this batch
+        p = (epoch * num_batches + batch_idx) / total_batches
+        lambda_ = compute_lambda_schedule(p)
+
+        # Update progress bar with current lambda value
+        pbar.set_postfix({'λ': f'{lambda_:.3f}'})
 
         # Get source batch (labeled)
         try:
@@ -348,22 +355,23 @@ def train_epoch(model, source_loader, target_loader, optimizer,
         source_images = source_images.to(device)
         source_labels = source_labels.to(device)
 
-        # Get target batch (unlabeled for domain adaptation)
+        # Get target batch (labels available for monitoring in-sample performance)
         try:
             batch = next(target_iter)
             if len(batch) == 3:  # (images, labels, domain)
-                target_images, _, _ = batch
+                target_images, target_labels, _ = batch
             else:  # (images, labels)
-                target_images, _ = batch
+                target_images, target_labels = batch
         except StopIteration:
             target_iter = iter(target_loader)
             batch = next(target_iter)
             if len(batch) == 3:
-                target_images, _, _ = batch
+                target_images, target_labels, _ = batch
             else:
-                target_images, _ = batch
+                target_images, target_labels = batch
 
         target_images = target_images.to(device)
+        target_labels = target_labels.to(device)
 
         # Zero gradients
         optimizer.zero_grad()
@@ -371,7 +379,7 @@ def train_epoch(model, source_loader, target_loader, optimizer,
         # Forward pass for source domain
         source_label_pred, source_domain_pred = model(source_images, lambda_)
 
-        # Forward pass for target domain
+        # Forward pass for target domain (both label and domain for monitoring)
         target_label_pred, target_domain_pred = model(target_images, lambda_)
 
         # Label loss (only on source domain)
@@ -384,6 +392,12 @@ def train_epoch(model, source_loader, target_loader, optimizer,
 
         domain_loss = criterion_domain(source_domain_pred, source_domain_labels) + \
                      criterion_domain(target_domain_pred, target_domain_labels)
+
+        # Target label accuracy (unsupervised evaluation - labels available for monitoring)
+        target_label_pred_indices = target_label_pred.data.max(1, keepdim=True)[1].squeeze()
+        target_label_correct = (target_label_pred_indices == target_labels).sum().item()
+        total_target_label_correct += target_label_correct
+        total_target_label_samples += target_images.size(0)
 
         # Total loss
         total_loss = label_loss + domain_loss
@@ -409,8 +423,16 @@ def train_epoch(model, source_loader, target_loader, optimizer,
         _, predicted_source_domains = torch.max(source_domain_pred, 1)
         _, predicted_target_domains = torch.max(target_domain_pred, 1)
 
+        # Track overall domain accuracy
         total_domain_correct += (predicted_source_domains == source_domain_labels).sum().item()
         total_domain_correct += (predicted_target_domains == target_domain_labels).sum().item()
+
+        # Track separate source and target domain accuracies
+        total_source_domain_correct += (predicted_source_domains == source_domain_labels).sum().item()
+        total_target_domain_correct += (predicted_target_domains == target_domain_labels).sum().item()
+
+        total_source_domain_samples += source_images.size(0)
+        total_target_domain_samples += target_images.size(0)
 
         total_samples += source_images.size(0) + target_images.size(0)
 
@@ -421,24 +443,32 @@ def train_epoch(model, source_loader, target_loader, optimizer,
     avg_label_loss = total_label_loss / num_batches
     avg_domain_loss = total_domain_loss / num_batches
     label_accuracy = total_label_correct / (total_samples // 2)  # Only source samples
+    target_label_accuracy = total_target_label_correct / total_target_label_samples if total_target_label_samples > 0 else 0.0
     domain_accuracy = total_domain_correct / total_samples
+    source_domain_accuracy = total_source_domain_correct / total_source_domain_samples if total_source_domain_samples > 0 else 0.0
+    target_domain_accuracy = total_target_domain_correct / total_target_domain_samples if total_target_domain_samples > 0 else 0.0
 
     return {
         'label_loss': avg_label_loss,
         'domain_loss': avg_domain_loss,
         'label_accuracy': label_accuracy,
+        'target_label_accuracy': target_label_accuracy,
         'domain_accuracy': domain_accuracy,
+        'source_domain_accuracy': source_domain_accuracy,
+        'target_domain_accuracy': target_domain_accuracy,
         'lambda': lambda_
     }
 
 
-def evaluate(model, dataloader, device, domain_name="Unknown", criterion=None):
+def evaluate(model, dataloader, device, domain_name="Unknown", criterion=None, domain_label=None, loss_domain=None):
     """Evaluate model on a dataset."""
 
     model.eval()
     correct = 0
     total = 0
-    total_loss = 0.0
+    total_label_loss = 0.0
+    total_domain_loss = 0.0
+    total_domain_correct = 0
 
     with torch.no_grad():
         for batch in dataloader:
@@ -450,117 +480,50 @@ def evaluate(model, dataloader, device, domain_name="Unknown", criterion=None):
             images = images.to(device)
             labels = labels.to(device)
 
-            # Only use label prediction (no domain adaptation during eval)
-            label_outputs, _ = model(images, lambda_=0.0)
+            # Get both label and domain predictions
+            label_outputs, domain_outputs = model(images, lambda_=0.0)
 
             _, predicted = torch.max(label_outputs, 1)
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
 
-            # Calculate loss if criterion provided
+            # Calculate label loss if criterion provided
             if criterion is not None:
-                loss = criterion(label_outputs, labels)
-                total_loss += loss.item() * labels.size(0)
+                label_loss = criterion(label_outputs, labels)
+                total_label_loss += label_loss.item() * labels.size(0)
+
+            # Calculate domain loss and accuracy if domain_label provided
+            if domain_label is not None:
+                domain_criterion = loss_domain if loss_domain is not None else nn.NLLLoss()
+                domain_labels = torch.full((labels.size(0),), domain_label, dtype=torch.long, device=device)
+                domain_loss = domain_criterion(domain_outputs, domain_labels)
+                total_domain_loss += domain_loss.item() * labels.size(0)
+
+                # Compute domain accuracy
+                domain_pred = domain_outputs.data.max(1, keepdim=True)[1]
+                total_domain_correct += domain_pred.eq(domain_labels.data.view_as(domain_pred)).cpu().sum().item()
 
     accuracy = correct / total
-    avg_loss = total_loss / total if criterion is not None else None
+    target_accuracy = correct / total  # Same as accuracy for now (in-sample monitoring)
+    avg_label_loss = total_label_loss / total if criterion is not None else None
+    avg_domain_loss = total_domain_loss / total if domain_label is not None else 0.0
+    domain_accuracy = total_domain_correct * 1.0 / total if domain_label is not None else 0.0
 
-    if criterion is not None:
-        print(f"{domain_name} Loss: {avg_loss:.4f}, Accuracy: {accuracy:.4f} ({correct}/{total})")
-        return accuracy, avg_loss
+    # Separate source and target domain accuracies
+    src_domain_accuracy = total_domain_correct * 1.0 / total if domain_label == 0 and total > 0 else 0.0
+    tgt_domain_accuracy = total_domain_correct * 1.0 / total if domain_label == 1 and total > 0 else 0.0
+
+    if criterion is not None and domain_label is not None:
+        print(f"{domain_name} Label Loss: {avg_label_loss:.4f}, Domain Loss: {avg_domain_loss:.4f}, Domain Acc: {domain_accuracy:.4f}, Accuracy: {accuracy:.4f} ({correct}/{total})")
+        return accuracy, target_accuracy, avg_label_loss, domain_accuracy, src_domain_accuracy, tgt_domain_accuracy, avg_domain_loss
+    elif criterion is not None:
+        print(f"{domain_name} Loss: {avg_label_loss:.4f}, Accuracy: {accuracy:.4f} ({correct}/{total})")
+        return accuracy, target_accuracy, avg_label_loss, 0.0, 0.0, 0.0, 0.0
     else:
         print(f"{domain_name} Accuracy: {accuracy:.4f} ({correct}/{total})")
-        return accuracy
+        return accuracy, target_accuracy, None, 0.0, 0.0, 0.0, 0.0
 
 
-def plot_training_losses(history, save_dir, logger=None):
-    """Plot and save training loss curves for DANN adversarial training."""
-    import matplotlib.pyplot as plt
-
-    if logger is None:
-        logger = logging.getLogger()
-
-    # Extract data from history
-    epochs = [h['epoch'] for h in history]
-    label_losses = [h['label_loss'] for h in history]
-    domain_losses = [h['domain_loss'] for h in history]
-    total_losses = [h['label_loss'] + h['domain_loss'] for h in history]
-    lambdas = [h['lambda'] for h in history]
-
-    # Create figure with subplots
-    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
-    fig.suptitle('DANN Training: Class Classifier vs Domain Classifier Losses', fontsize=16, fontweight='bold')
-
-    # Plot 1: Main losses (Class vs Domain Classifier)
-    ax1.plot(epochs, label_losses, 'b-', linewidth=2, label='Class Classifier Loss', marker='o', markersize=4)
-    ax1.plot(epochs, domain_losses, 'r-', linewidth=2, label='Domain Classifier Loss', marker='s', markersize=4)
-    ax1.set_title('Adversarial Losses (Generator vs Discriminator)', fontweight='bold')
-    ax1.set_xlabel('Epoch')
-    ax1.set_ylabel('Loss')
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
-
-    # Plot 2: Total loss
-    ax2.plot(epochs, total_losses, 'g-', linewidth=2, label='Total Loss', marker='^', markersize=4)
-    ax2.set_title('Total Training Loss', fontweight='bold')
-    ax2.set_xlabel('Epoch')
-    ax2.set_ylabel('Loss')
-    ax2.legend()
-    ax2.grid(True, alpha=0.3)
-
-    # Plot 3: Individual losses with different scales
-    ax3.plot(epochs, label_losses, 'b-', linewidth=2, label='Class Loss', marker='o', markersize=4)
-    ax3.set_title('Class Classifier Loss', fontweight='bold')
-    ax3.set_xlabel('Epoch')
-    ax3.set_ylabel('Loss')
-    ax3.legend()
-    ax3.grid(True, alpha=0.3)
-
-    ax4.plot(epochs, domain_losses, 'r-', linewidth=2, label='Domain Loss', marker='s', markersize=4)
-    ax4.set_title('Domain Classifier Loss', fontweight='bold')
-    ax4.set_xlabel('Epoch')
-    ax4.set_ylabel('Loss')
-    ax4.legend()
-    ax4.grid(True, alpha=0.3)
-
-    # Adjust layout and save
-    plt.tight_layout()
-
-    # Save the plot
-    plot_path = os.path.join(save_dir, 'dann_training_losses.png')
-    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-
-    # Close the figure to free memory
-    plt.close(fig)
-
-    # Create a second plot focusing on the adversarial dynamics (lambda schedule)
-    fig2, ax = plt.subplots(1, 1, figsize=(10, 6))
-    ax2 = ax.twinx()
-
-    # Plot losses
-    line1 = ax.plot(epochs, label_losses, 'b-', linewidth=2, label='Class Classifier (Generator)', marker='o', markersize=4)
-    line2 = ax.plot(epochs, domain_losses, 'r-', linewidth=2, label='Domain Classifier (Discriminator)', marker='s', markersize=4)
-
-    # Plot lambda schedule
-    line3 = ax2.plot(epochs, lambdas, 'g--', linewidth=2, label='Lambda (GRL Strength)', marker='^', markersize=4)
-
-    ax.set_title('DANN Adversarial Training Dynamics', fontweight='bold')
-    ax.set_xlabel('Epoch')
-    ax.set_ylabel('Loss', color='black')
-    ax2.set_ylabel('Lambda (Gradient Reversal Strength)', color='green')
-
-    # Combine legends
-    lines = line1 + line2 + line3
-    labels = [l.get_label() for l in lines]
-    ax.legend(lines, labels, loc='upper right')
-
-    ax.grid(True, alpha=0.3)
-
-    # Save the adversarial dynamics plot
-    plot_path2 = os.path.join(save_dir, 'dann_adversarial_dynamics.png')
-    plt.savefig(plot_path2, dpi=300, bbox_inches='tight')
-
-    plt.close(fig2)
 
 
 # ============================================
@@ -757,8 +720,8 @@ def main():
 
     # Adam optimizer handles learning rate adaptively - no manual scheduling needed
 
-    # Training history
-    history = []
+    # Create training tracker
+    tracker = create_tracker(save_dir=config['save_dir'])
 
     # Train and evaluate baseline model (skip by default for faster DANN testing)
     skip_baseline = True  # Set to False to run baseline training
@@ -769,14 +732,14 @@ def main():
     else:
         logger.info("\n🔍 Establishing Baseline...")
         baseline_model = train_baseline(source_loader, target_loader, config, num_epochs=5)
-        baseline_mnist_acc, baseline_mnist_loss = evaluate(baseline_model, mnist_test_loader, config['device'], "MNIST (baseline)", criterion_label)
-        baseline_mnist_m_acc, baseline_mnist_m_loss = evaluate(baseline_model, mnist_m_test_loader, config['device'], "MNIST-M (baseline)", criterion_label)
+        baseline_mnist_acc, _, baseline_mnist_loss, _, _, _, _ = evaluate(baseline_model, mnist_test_loader, config['device'], "MNIST (baseline)", criterion_label, loss_domain=criterion_domain)
+        baseline_mnist_m_acc, _, baseline_mnist_m_loss, _, _, _, _ = evaluate(baseline_model, mnist_m_test_loader, config['device'], "MNIST-M (baseline)", criterion_label, loss_domain=criterion_domain)
 
     logger.info(f"Baseline MNIST-M Accuracy: {baseline_mnist_m_acc:.4f}")
     # Evaluate before training DANN
     logger.info("\n📊 Pre-training DANN evaluation:")
-    mnist_acc_before, mnist_loss_before = evaluate(model, mnist_test_loader, config['device'], "MNIST (before DANN)", criterion_label)
-    mnist_m_acc_before, mnist_m_loss_before = evaluate(model, mnist_m_test_loader, config['device'], "MNIST-M (before DANN)", criterion_label)
+    mnist_acc_before, _, mnist_loss_before, _, _, _, _ = evaluate(model, mnist_test_loader, config['device'], "MNIST (before DANN)", criterion_label, loss_domain=criterion_domain)
+    mnist_m_acc_before, _, mnist_m_loss_before, _, _, _, _ = evaluate(model, mnist_m_test_loader, config['device'], "MNIST-M (before DANN)", criterion_label, loss_domain=criterion_domain)
 
     # Training loop
     logger.info("\n🎯 Starting DANN training...")
@@ -794,20 +757,25 @@ def main():
         # Adam optimizer handles learning rate adaptively
 
         # Evaluate on test sets
-        mnist_acc, mnist_loss = evaluate(model, mnist_test_loader, config['device'], f"MNIST (epoch {epoch+1})", criterion_label)
-        mnist_m_acc, mnist_m_loss = evaluate(model, mnist_m_test_loader, config['device'], f"MNIST-M (epoch {epoch+1})", criterion_label)
+        mnist_acc, mnist_target_acc, mnist_loss, mnist_domain_acc, mnist_src_domain_acc, mnist_tgt_domain_acc, mnist_domain_loss = evaluate(model, mnist_test_loader, config['device'], f"MNIST (epoch {epoch+1})", criterion_label, domain_label=0, loss_domain=criterion_domain)
+        mnist_m_acc, mnist_m_target_acc, mnist_m_loss, mnist_m_domain_acc, mnist_m_src_domain_acc, mnist_m_tgt_domain_acc, mnist_m_domain_loss = evaluate(model, mnist_m_test_loader, config['device'], f"MNIST-M (epoch {epoch+1})", criterion_label, domain_label=1, loss_domain=criterion_domain)
 
-        # Store results
-        epoch_result = {
-            **epoch_stats,
-            'epoch': epoch + 1,
-            'mnist_test_acc': mnist_acc,
-            'mnist_test_loss': mnist_loss,
-            'mnist_m_test_acc': mnist_m_acc,
-            'mnist_m_test_loss': mnist_m_loss,
-            'learning_rate': optimizer.param_groups[0]['lr']
-        }
-        history.append(epoch_result)
+        # Update tracker with epoch metrics
+        tracker.update_epoch_metrics(
+            train_label_loss=epoch_stats['label_loss'],
+            train_domain_loss=epoch_stats['domain_loss'],
+            train_label_source_acc=epoch_stats['label_accuracy'],  # Training label accuracy (source only)
+            train_label_target_acc=epoch_stats['target_label_accuracy'],  # In-sample target label accuracy (labels available for monitoring)
+            train_domain_acc=epoch_stats['domain_accuracy'],     # Training domain accuracy
+            val_label_source_loss=mnist_loss,
+            val_label_target_loss=mnist_m_loss,
+            val_label_source_acc=mnist_acc,
+            val_label_target_acc=mnist_m_acc,
+            val_domain_loss=(mnist_domain_loss + mnist_m_domain_loss) / 2.0,  # Average domain loss on validation
+            val_domain_accuracy=(mnist_domain_acc + mnist_m_domain_acc) / 2.0,  # Average domain accuracy on validation
+            lambda_value=epoch_stats['lambda'],
+            epoch_time=0.0  # Not tracked in this implementation
+        )
 
         current_lr = optimizer.param_groups[0]['lr']
         current_lambda = epoch_stats['lambda']
@@ -821,13 +789,12 @@ def main():
 
     # Final evaluation
     logger.info("\n🏁 Final evaluation:")
-    mnist_acc_final, mnist_loss_final = evaluate(model, mnist_test_loader, config['device'], "MNIST (final)", criterion_label)
-    mnist_m_acc_final, mnist_m_loss_final = evaluate(model, mnist_m_test_loader, config['device'], "MNIST-M (final)", criterion_label)
+    mnist_acc_final, _, mnist_loss_final, _, _, _, _ = evaluate(model, mnist_test_loader, config['device'], "MNIST (final)", criterion_label, loss_domain=criterion_domain)
+    mnist_m_acc_final, _, mnist_m_loss_final, _, _, _, _ = evaluate(model, mnist_m_test_loader, config['device'], "MNIST-M (final)", criterion_label, loss_domain=criterion_domain)
 
     # Save results
     results = {
         'config': config,
-        'history': history,
         'final_results': {
             'mnist_accuracy': mnist_acc_final,
             'mnist_m_accuracy': mnist_m_acc_final,
@@ -848,15 +815,25 @@ def main():
     }, model_path)
     logger.info(f"💾 Model saved to {model_path}")
 
-    # Plot and save loss curves
-    plot_training_losses(history, config['save_dir'], logger)
+    # Generate plots and save results
+    logger.info("\nGenerating training plots...")
+    tracker.generate_all_plots()
+    tracker.save_metrics()
+    tracker.print_summary()
 
-    # Print training summary
-    logger.info("\n📈 Training Summary:")
-    logger.info("Epoch | Label Loss | Label Acc | Domain Loss | Domain Acc | MNIST Test | MNIST-M Test | Lambda | LR")
-    logger.info("-" * 100)
-    for h in history:
-        logger.info(f"{h['epoch']:>3d}   | {h['label_loss']:>8.4f}   | {h['label_accuracy']:>8.4f}   | {h['domain_loss']:>10.4f}   | {h['domain_accuracy']:>9.4f}   | {h['mnist_test_acc']:>9.4f}   | {h['mnist_m_test_acc']:>10.4f}   | {h['lambda']:>5.3f}   | {h['learning_rate']:>6.6f}")
+    # Save training summary
+    config_summary = {
+        'source_name': 'mnist',
+        'target_name': 'mnist_m',
+        'n_epoch': config['num_epochs'],
+        'batch_size': config['batch_size'],
+        'learning_rate': config['learning_rate'],
+        'device': config['device'],
+        'experiment_name': config['experiment_name']
+    }
+    save_training_summary(tracker, model, config_summary)
+
+    # Print training summary (now handled by tracker.print_summary() above)
 
     # Save baseline results
     results['baseline_results'] = {
@@ -909,7 +886,8 @@ def main():
     logger.info("Files saved:")
     logger.info(f"  - Results: mnist_dann_results.pth")
     logger.info(f"  - Model: dann_model.pth")
-    logger.info(f"  - Loss plots: dann_training_losses.png, dann_adversarial_dynamics.png")
+    logger.info(f"  - Loss plots: loss_curves.png, accuracy_curves.png, gradient_analysis.png")
+    logger.info(f"  - Metrics: training_metrics.json, training_summary.json")
     logger.info(f"  - Logs: {config['experiment_name']}.log")
 
 
