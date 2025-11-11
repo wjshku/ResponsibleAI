@@ -201,64 +201,52 @@ class MNISTMDataset(Dataset):
 # ============================================
 class MNISTDANN(nn.Module):
     """DANN for MNIST/MNIST-M domain adaptation (digits 0-9).
-    
+
     Architecture matches the DANN paper:
-    - Feature extractor: 2 conv layers (32 and 48 maps) with max-pooling
-    - Label predictor: 2 FC layers (100 units each) + output (10 units, softmax)
-    - Domain classifier: 1 FC layer (100 units) + output (1 unit, sigmoid)
+    - Feature extractor: 2 conv layers (64 and 50 maps) with batch norm and dropout
+    - Label predictor: 2 FC layers (100 units each) with batch norm and dropout
+    - Domain classifier: 1 FC layer (100 units) with batch norm
     """
 
     def __init__(self, num_classes=10):
         super(MNISTDANN, self).__init__()
 
-        # Feature extractor (matches paper architecture)
-        # Layer 1: conv 5x5, 32 maps, ReLU -> max-pool 2x2, stride 2x2
-        # Layer 2: conv 5x5, 48 maps, ReLU -> max-pool 2x2, stride 2x2
-        # Use adaptive pooling to handle variable input sizes (MNIST vs MNIST-M)
-        self.feature_extractor = nn.Sequential(
-            # First conv: input -> same size (with padding=2 to maintain size)
-            nn.Conv2d(3, 32, kernel_size=5, stride=1, padding=2),
-            nn.ReLU(inplace=True),
-            # Max-pool 2x2, stride 2x2: HxW -> H/2 x W/2
-            nn.MaxPool2d(kernel_size=2, stride=2),
-            
-            # Second conv: H/2 x W/2 -> H/2 x W/2 (with padding=2)
-            nn.Conv2d(32, 48, kernel_size=5, stride=1, padding=2),
-            nn.ReLU(inplace=True),
-            # Max-pool 2x2, stride 2x2: H/2 x W/2 -> H/4 x W/4
-            nn.MaxPool2d(kernel_size=2, stride=2),
-            
-            # Adaptive pooling to ensure consistent output size (7x7 for 28x28 input)
-            # This handles variable input sizes gracefully
-            nn.AdaptiveAvgPool2d((7, 7)),
-            
-            # Flatten: 48 * 7 * 7 = 2352
-            nn.Flatten()
-        )
+        # Feature extractor (matches DANN paper architecture)
+        self.feature_extractor = nn.Sequential()
+        self.feature_extractor.add_module('f_conv1', nn.Conv2d(3, 64, kernel_size=5))
+        self.feature_extractor.add_module('f_bn1', nn.BatchNorm2d(64))
+        self.feature_extractor.add_module('f_pool1', nn.MaxPool2d(2))
+        self.feature_extractor.add_module('f_relu1', nn.ReLU(True))
+        self.feature_extractor.add_module('f_conv2', nn.Conv2d(64, 50, kernel_size=5))
+        self.feature_extractor.add_module('f_bn2', nn.BatchNorm2d(50))
+        self.feature_extractor.add_module('f_drop1', nn.Dropout2d())
+        self.feature_extractor.add_module('f_pool2', nn.MaxPool2d(2))
+        self.feature_extractor.add_module('f_relu2', nn.ReLU(True))
+        self.feature_extractor.add_module('f_flatten', nn.Flatten())
 
 
-        # Calculate feature dimension: 48 * 7 * 7 = 2352
-        self.feature_dim = 48 * 7 * 7
+        # Calculate feature dimension: 50 * 4 * 4 = 800
+        self.feature_dim = 50 * 4 * 4
 
         # Label predictor (digit classification)
-        # fully-conn, 100 units, ReLU -> fully-conn, 100 units, ReLU -> fully-conn, 10 units, Soft-max
-        self.label_predictor = nn.Sequential(
-            nn.Linear(self.feature_dim, 100),
-            nn.ReLU(inplace=True),
-            nn.Linear(100, 100),
-            nn.ReLU(inplace=True),
-            nn.Linear(100, num_classes)
-            # Softmax will be applied in loss function (CrossEntropyLoss includes it)
-        )
+        self.label_predictor = nn.Sequential()
+        self.label_predictor.add_module('c_fc1', nn.Linear(self.feature_dim, 100))
+        self.label_predictor.add_module('c_bn1', nn.BatchNorm1d(100))
+        self.label_predictor.add_module('c_relu1', nn.ReLU(True))
+        self.label_predictor.add_module('c_drop1', nn.Dropout())
+        self.label_predictor.add_module('c_fc2', nn.Linear(100, 100))
+        self.label_predictor.add_module('c_bn2', nn.BatchNorm1d(100))
+        self.label_predictor.add_module('c_relu2', nn.ReLU(True))
+        self.label_predictor.add_module('c_fc3', nn.Linear(100, num_classes))
+        # Softmax will be applied in loss function (CrossEntropyLoss includes it)
 
         # Domain classifier (MNIST vs MNIST-M)
-        # GRL -> fully-conn, 100 units, ReLU -> fully-conn, 1 unit, Logistic (sigmoid)
-        self.domain_classifier = nn.Sequential(
-            nn.Linear(self.feature_dim, 100),
-            nn.ReLU(inplace=True),
-            nn.Linear(100, 1)
-            # Sigmoid will be applied in loss function (BCEWithLogitsLoss includes it)
-        )
+        self.domain_classifier = nn.Sequential()
+        self.domain_classifier.add_module('d_fc1', nn.Linear(self.feature_dim, 100))
+        self.domain_classifier.add_module('d_bn1', nn.BatchNorm1d(100))
+        self.domain_classifier.add_module('d_relu1', nn.ReLU(True))
+        self.domain_classifier.add_module('d_fc2', nn.Linear(100, 2))
+        # Softmax will be applied in loss function (CrossEntropyLoss includes it)
 
         # Gradient reversal layer
         self.grl = GradientReversalLayer()
@@ -293,9 +281,27 @@ class MNISTDANN(nn.Module):
 # ============================================
 # Training Functions
 # ============================================
-def compute_lambda_schedule(p, gamma=10.0, zeta=1.0):
-    """Compute lambda schedule from DANN paper: lambda_p = zeta * (2/(1+exp(-gamma*p)) - 1)"""
-    return zeta * (2.0 / (1.0 + np.exp(-gamma * p)) - 1.0)
+def compute_lambda_schedule(epoch, total_epochs, gamma=10.0, zeta=1.0):
+    """
+    Compute lambda parameter using schedule from DANN paper.
+
+    Lambda gradually increases from 0 to zeta during training following:
+        lambda_p = zeta * (2 / (1 + exp(-gamma * p)) - 1)
+
+    where p = epoch / total_epochs (training progress)
+
+    Args:
+        epoch: Current epoch (0-indexed)
+        total_epochs: Total number of training epochs
+        gamma: Sharpness of the schedule (default: 10.0 from paper)
+        zeta: Maximum adaptation strength in [0, 1] (default: 1.0)
+
+    Returns:
+        lambda_p: Adaptation strength in [0, zeta]
+    """
+    p = float(epoch) / float(total_epochs)
+    lambda_p = zeta * (2.0 / (1.0 + np.exp(-gamma * p)) - 1.0)
+    return lambda_p
 
 
 def train_epoch(model, source_loader, target_loader, optimizer,
@@ -309,6 +315,9 @@ def train_epoch(model, source_loader, target_loader, optimizer,
     total_domain_correct = 0
     total_samples = 0
 
+    # Calculate lambda for this epoch (constant throughout epoch)
+    lambda_ = compute_lambda_schedule(epoch, total_epochs)
+
     # Create iterators
     source_iter = iter(source_loader)
     target_iter = iter(target_loader)
@@ -316,7 +325,10 @@ def train_epoch(model, source_loader, target_loader, optimizer,
     # Train until shorter dataset is exhausted
     num_batches = min(len(source_loader), len(target_loader))
 
-    for batch_idx in tqdm(range(num_batches), desc=f"Epoch {epoch+1}/{total_epochs}"):
+    pbar = tqdm(range(num_batches), desc=f"Epoch {epoch+1}/{total_epochs}")
+    pbar.set_postfix({'λ': f'{lambda_:.3f}'})
+
+    for batch_idx in pbar:
 
         # Get source batch (labeled)
         try:
@@ -356,10 +368,6 @@ def train_epoch(model, source_loader, target_loader, optimizer,
         # Zero gradients
         optimizer.zero_grad()
 
-        # Compute lambda for this epoch
-        p = (epoch * num_batches + batch_idx) / (total_epochs * num_batches)
-        lambda_ = compute_lambda_schedule(p, zeta=config['zeta'])
-
         # Forward pass for source domain
         source_label_pred, source_domain_pred = model(source_images, lambda_)
 
@@ -370,9 +378,9 @@ def train_epoch(model, source_loader, target_loader, optimizer,
         label_loss = criterion_label(source_label_pred, source_labels)
 
         # Domain loss (on both domains)
-        # Binary classification: 0.0 for source (MNIST), 1.0 for target (MNIST-M)
-        source_domain_labels = torch.zeros(source_images.size(0), dtype=torch.float32, device=device).unsqueeze(1)
-        target_domain_labels = torch.ones(target_images.size(0), dtype=torch.float32, device=device).unsqueeze(1)
+        # Binary classification: 0 for source (MNIST), 1 for target (MNIST-M)
+        source_domain_labels = torch.zeros(source_images.size(0), dtype=torch.long, device=device)
+        target_domain_labels = torch.ones(target_images.size(0), dtype=torch.long, device=device)
 
         domain_loss = criterion_domain(source_domain_pred, source_domain_labels) + \
                      criterion_domain(target_domain_pred, target_domain_labels)
@@ -397,16 +405,17 @@ def train_epoch(model, source_loader, target_loader, optimizer,
         total_label_correct += (predicted_labels == source_labels).sum().item()
 
         # Domain accuracy (both domains)
-        # Apply sigmoid and threshold at 0.5 for binary classification
-        source_domain_probs = torch.sigmoid(source_domain_pred)
-        target_domain_probs = torch.sigmoid(target_domain_pred)
-        predicted_source_domains = (source_domain_probs > 0.5).long()
-        predicted_target_domains = (target_domain_probs > 0.5).long()
+        # Use argmax for multi-class classification
+        _, predicted_source_domains = torch.max(source_domain_pred, 1)
+        _, predicted_target_domains = torch.max(target_domain_pred, 1)
 
-        total_domain_correct += (predicted_source_domains == source_domain_labels.long()).sum().item()
-        total_domain_correct += (predicted_target_domains == target_domain_labels.long()).sum().item()
+        total_domain_correct += (predicted_source_domains == source_domain_labels).sum().item()
+        total_domain_correct += (predicted_target_domains == target_domain_labels).sum().item()
 
         total_samples += source_images.size(0) + target_images.size(0)
+
+    # Close progress bar
+    pbar.close()
 
     # Return averages
     avg_label_loss = total_label_loss / num_batches
@@ -567,8 +576,7 @@ def train_baseline(source_loader, target_loader, config, num_epochs=5):
     criterion = nn.CrossEntropyLoss()
     # Baseline uses fixed learning rate of 0.001 (following original DANN paper)
     baseline_lr = 1e-3
-    optimizer = optim.Adam(model.parameters(), lr=baseline_lr,
-                          weight_decay=config['weight_decay'])
+    optimizer = optim.Adam(model.parameters(), lr=baseline_lr)
 
     # Train only on source domain
     for epoch in range(num_epochs):
@@ -637,17 +645,15 @@ def main():
     import sys
     quick_test = '--quick' in sys.argv
 
-    # Create timestamped experiment directory in models_minst
+    # Create timestamped experiment directory in models_mnist
     from datetime import datetime
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    save_dir = f'./models_minst/model_dann_{timestamp}'
+    save_dir = f'./models_mnist/model_dann_{timestamp}'
 
     config = {
-        'batch_size': 256 if quick_test else 128,  # Larger batch for quick test
+        'batch_size': 128 if quick_test else 64,  # Larger batch for quick test
         'num_epochs': 2 if quick_test else 20,     # Quick test or full training
         'learning_rate': 1e-3,
-        'weight_decay': 1e-4,
-        'zeta': 1.0,  # Maximum adaptation strength (try 1.0, 2.0, 3.0 for stronger GRL)
         'image_size': 28,  # Image size for resizing
         'device': device,
         'save_dir': save_dir,
@@ -744,11 +750,10 @@ def main():
 
     # Loss functions
     criterion_label = nn.CrossEntropyLoss()
-    criterion_domain = nn.BCEWithLogitsLoss()  # Binary classification for domain (1 output unit with sigmoid)
+    criterion_domain = nn.CrossEntropyLoss()  # Binary classification for domain (2 output units with softmax)
 
     # Optimizer (using Adam for better convergence)
-    optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'],
-                          weight_decay=config['weight_decay'])
+    optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'])
 
     # Adam optimizer handles learning rate adaptively - no manual scheduling needed
 
