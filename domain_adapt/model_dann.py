@@ -1,342 +1,349 @@
 #!/usr/bin/env python3
 """
-Domain Adversarial Neural Network (DANN) for fake image detection.
+Abstract base class for DANN (Domain Adversarial Neural Network) models.
 
-Implementation based on "Unsupervised Domain Adaptation by Backpropagation"
-(Ganin & Lempitsky, 2015).
+This module provides an abstract base class that defines the standard DANN architecture:
+- Feature Extractor (shared backbone)
+- Label Classifier (task-specific)
+- Domain Classifier (domain discriminator with gradient reversal)
 
-This model learns features that are:
-1. Discriminative for real vs fake classification
-2. Invariant to which generative model created the fakes (SD2 vs Kontext)
+Subclass this to create new DANN models for different datasets or architectures.
 """
 
 import torch
 import torch.nn as nn
-from models import CNNClassifier
+from abc import ABC, abstractmethod
+from typing import Tuple
 
 
-class GradientReversalFunction(torch.autograd.Function):
+# ============================================
+# Gradient Reversal Layer (GRL)
+# ============================================
+class ReverseLayerF(torch.autograd.Function):
     """
-    Gradient Reversal Layer (GRL) from the DANN paper.
+    Gradient Reversal Layer from the DANN paper.
 
-    Forward pass: Identity function (output = input)
-    Backward pass: Multiply gradient by -lambda (reversed gradient)
+    Forward pass: Identity function
+    Backward pass: Multiply gradient by -alpha (reversal)
 
-    This forces the feature extractor to learn features that:
-    - Minimize label classification loss (real vs fake)
-    - Maximize domain classification loss (confuse domain classifier)
+    This layer enables adversarial training by reversing gradients during
+    backpropagation, forcing the feature extractor to learn domain-invariant features.
     """
 
     @staticmethod
-    def forward(ctx, x, lambda_):
+    def forward(ctx, x, alpha):
         """
-        Forward pass: Identity transformation.
+        Forward pass: Identity function.
 
         Args:
-            x: Input tensor
-            lambda_: Adaptation strength parameter
+            ctx: Context object for storing values
+            x: Input features
+            alpha: Gradient reversal strength (0=no reversal, 1=full reversal)
 
         Returns:
-            x unchanged
+            x: Same as input (identity function)
         """
-        ctx.lambda_ = lambda_
+        ctx.alpha = alpha
         return x.view_as(x)
 
     @staticmethod
     def backward(ctx, grad_output):
         """
-        Backward pass: Reverse and scale gradient.
+        Backward pass: Multiply gradient by -alpha.
 
         Args:
-            grad_output: Gradient from downstream layers
+            ctx: Context object containing alpha
+            grad_output: Gradient from next layer
 
         Returns:
-            Reversed gradient: -lambda * grad_output
+            Reversed gradient, None (for alpha)
         """
-        lambda_ = ctx.lambda_
-        # Multiply gradient by -lambda (reversal)
-        grad_input = -lambda_ * grad_output
-        # Return gradient for x and None for lambda_ (lambda_ is not learnable)
-        return grad_input, None
+        output = grad_output.neg() * ctx.alpha
+        return output, None
 
 
-class GradientReversalLayer(nn.Module):
+# ============================================
+# Abstract Base Class for DANN Models
+# ============================================
+class AbstractDANN(nn.Module, ABC):
     """
-    Gradient Reversal Layer as a PyTorch module.
+    Abstract base class for Domain Adversarial Neural Network (DANN) models.
 
-    Usage:
-        grl = GradientReversalLayer()
-        grl.lambda_ = 0.5  # Set adaptation strength
-        reversed_features = grl(features)
+    This class defines the standard DANN architecture with three components:
+    1. Feature Extractor: Shared backbone that extracts features from input
+    2. Label Classifier: Task-specific classifier (e.g., digit classification)
+    3. Domain Classifier: Domain discriminator (source vs target)
+
+    The forward pass follows this flow:
+        Input → Feature Extractor → Features
+        Features → Label Classifier → Label Predictions
+        Features → [GRL] → Domain Classifier → Domain Predictions
+
+    Subclass this and implement:
+        - _build_feature_extractor(): Build the feature extraction backbone
+        - _build_label_classifier(): Build the label classification head
+        - _build_domain_classifier(): Build the domain classification head
+        - _get_feature_dim(): Return the flattened feature dimension
+
+    Example:
+        class MyDANNModel(AbstractDANN):
+            def _build_feature_extractor(self):
+                return nn.Sequential(...)
+            
+            def _build_label_classifier(self):
+                return nn.Sequential(...)
+            
+            def _build_domain_classifier(self):
+                return nn.Sequential(...)
+            
+            def _get_feature_dim(self):
+                return 800  # Flattened feature dimension
     """
 
     def __init__(self):
-        super(GradientReversalLayer, self).__init__()
-        self.lambda_ = 1.0
-
-    def forward(self, x):
-        """Apply gradient reversal with current lambda value."""
-        return GradientReversalFunction.apply(x, self.lambda_)
-
-
-class DomainAdversarialNN(nn.Module):
-    """
-    Domain Adversarial Neural Network for cross-domain fake detection.
-
-    Architecture:
-        Input Image
-            ↓
-        Feature Extractor (CNN backbone)
-            ↓
-        Features (512-dim)
-            ↓
-            ├→ Label Predictor → Real/Fake classification
-            │
-            └→ [GRL] → Domain Classifier → SD2/Kontext classification
-
-    The GRL ensures that features are domain-invariant while remaining
-    discriminative for the main classification task.
-    """
-
-    def __init__(self,
-                 input_channels: int = 3,
-                 num_classes: int = 1,
-                 feature_hidden_size: int = 256,
-                 domain_hidden_size: int = 256,
-                 dropout: float = 0.3):
         """
-        Initialize DANN model.
+        Initialize the DANN model.
 
-        Args:
-            input_channels: Number of input channels (3 for RGB)
-            num_classes: Number of output classes (1 for binary)
-            feature_hidden_size: Hidden size for label predictor
-            domain_hidden_size: Hidden size for domain classifier
-            dropout: Dropout probability
+        Subclasses should call super().__init__() and then build components.
         """
-        super(DomainAdversarialNN, self).__init__()
+        super(AbstractDANN, self).__init__()
 
-        # ============================================
-        # Feature Extractor: Shared CNN backbone
-        # ============================================
-        # Reuse the convolutional layers from existing CNNClassifier
-        base_cnn = CNNClassifier(
-            input_channels=input_channels,
-            num_classes=num_classes,
-            dropout=dropout,
-            hidden_size=feature_hidden_size
-        )
+        # Build the three main components
+        self.feature_extractor = self._build_feature_extractor()
+        self.class_classifier = self._build_label_classifier()
+        self.domain_classifier = self._build_domain_classifier()
 
-        # Extract only the convolutional feature extractor
-        self.feature_extractor = base_cnn.features  # Conv layers only
-
-        # Add pooling and flattening to get fixed-size feature vector
-        self.feature_pooling = nn.Sequential(
-            nn.AdaptiveAvgPool2d((1, 1)),  # Global average pooling → (batch, 512, 1, 1)
-            nn.Flatten()                    # Flatten → (batch, 512)
-        )
-
-        # Feature dimension from last conv layer
-        self.feature_dim = 512
-
-        # ============================================
-        # Label Predictor: Real vs Fake classifier
-        # ============================================
-        reduced_size = max(feature_hidden_size // 4, 16)
-        self.label_predictor = nn.Sequential(
-            nn.Dropout(dropout),
-            nn.Linear(self.feature_dim, feature_hidden_size),
-            nn.ReLU(inplace=True),
-            nn.Dropout(dropout),
-            nn.Linear(feature_hidden_size, reduced_size),
-            nn.ReLU(inplace=True),
-            nn.Dropout(dropout),
-            nn.Linear(reduced_size, num_classes),
-            nn.Sigmoid()
-        )
-
-        # ============================================
-        # Gradient Reversal Layer
-        # ============================================
-        self.grl = GradientReversalLayer()
-
-        # ============================================
-        # Domain Classifier: Source vs Target classifier
-        # ============================================
-        # This classifier tries to distinguish SD2-fakes from Kontext-fakes
-        # The GRL makes the feature extractor try to fool this classifier
-        domain_mid_size = domain_hidden_size // 2
-        self.domain_classifier = nn.Sequential(
-            nn.Linear(self.feature_dim, domain_hidden_size),
-            nn.ReLU(inplace=True),
-            nn.Dropout(dropout),
-            nn.Linear(domain_hidden_size, domain_mid_size),
-            nn.ReLU(inplace=True),
-            nn.Dropout(dropout),
-            nn.Linear(domain_mid_size, 1),
-            nn.Sigmoid()  # Binary: 0=source (SD2), 1=target (Kontext)
-        )
-
-    def forward(self, x, alpha=1.0):
+    @abstractmethod
+    def _build_feature_extractor(self) -> nn.Module:
         """
-        Forward pass through the DANN model.
+        Build the feature extraction backbone.
 
-        Args:
-            x: Input images, shape (batch, channels, height, width)
-            alpha: Lambda parameter for GRL (adaptation strength)
-                   - 0.0: No domain adaptation (inference mode)
-                   - 1.0: Full domain adaptation
-                   - Scheduled from 0→1 during training
+        This should be a shared network that extracts features from input images
+        and outputs flattened features (2D tensor: batch, feature_dim).
+        The output should be suitable for both label and domain classification.
+
+        The feature extractor should handle:
+        1. Feature extraction (e.g., CNN layers)
+        2. Flattening to 2D tensor (batch, feature_dim)
 
         Returns:
-            label_output: Real/fake predictions, shape (batch, 1)
-            domain_output: Source/target predictions, shape (batch, 1)
+            nn.Module: Feature extraction network that outputs (batch, feature_dim)
         """
-        # ============================================
-        # 1. Extract features (shared representation)
-        # ============================================
-        features = self.feature_extractor(x)      # Conv features
-        features = self.feature_pooling(features)  # (batch, 512)
+        pass
 
-        # ============================================
-        # 2. Label prediction (real vs fake)
-        # ============================================
-        label_output = self.label_predictor(features)
-
-        # ============================================
-        # 3. Domain prediction (with gradient reversal)
-        # ============================================
-        # Update GRL's lambda parameter
-        self.grl.lambda_ = alpha
-
-        # Apply gradient reversal
-        reversed_features = self.grl(features)
-
-        # Domain classification on reversed features
-        domain_output = self.domain_classifier(reversed_features)
-
-        return label_output, domain_output
-
-    def predict_labels(self, x):
+    @abstractmethod
+    def _build_label_classifier(self) -> nn.Module:
         """
-        Predict only labels (for inference).
+        Build the label classification head.
 
-        Args:
-            x: Input images
+        This network takes flattened features and outputs label predictions.
+        Typically ends with LogSoftmax for NLLLoss compatibility.
 
         Returns:
-            Label predictions only (no domain predictions)
+            nn.Module: Label classification network
         """
-        label_output, _ = self.forward(x, alpha=0.0)
-        return label_output
+        pass
 
+    @abstractmethod
+    def _build_domain_classifier(self) -> nn.Module:
+        """
+        Build the domain classification head.
 
-def get_dann_model(input_channels=3,
-                   num_classes=1,
-                   feature_hidden_size=256,
-                   domain_hidden_size=256,
-                   dropout=0.3,
-                   **kwargs):
-    """
-    Factory function to create DANN model.
+        This network takes features (after gradient reversal) and outputs
+        domain predictions (source vs target). Typically ends with LogSoftmax.
 
-    Args:
-        input_channels: Number of input channels (3 for RGB)
-        num_classes: Number of output classes (1 for binary)
-        feature_hidden_size: Hidden size for label predictor
-        domain_hidden_size: Hidden size for domain classifier
-        dropout: Dropout probability
+        Returns:
+            nn.Module: Domain classification network
+        """
+        pass
 
-    Returns:
-        DomainAdversarialNN model instance
-    """
-    return DomainAdversarialNN(
-        input_channels=input_channels,
-        num_classes=num_classes,
-        feature_hidden_size=feature_hidden_size,
-        domain_hidden_size=domain_hidden_size,
-        dropout=dropout
-    )
+    @abstractmethod
+    def _get_feature_dim(self) -> int:
+        """
+        Get the flattened feature dimension.
+
+        This is needed to properly flatten features before passing to classifiers.
+        Should return the size of features after flattening (e.g., channels * height * width).
+
+        Returns:
+            int: Flattened feature dimension
+        """
+        pass
+
+    def forward(self, input_data: torch.Tensor, alpha: float = 1.0) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Forward pass through DANN model.
+
+        Standard DANN forward procedure:
+        1. Extract and flatten features from input (via feature extractor)
+        2. Apply gradient reversal to features (for domain classification)
+        3. Predict labels from original features
+        4. Predict domain from reversed features
+
+        Args:
+            input_data: Input images (batch, channels, height, width)
+            alpha: Gradient reversal strength (0=no reversal, 1=full reversal)
+                   Typically scheduled during training (0 → 1)
+
+        Returns:
+            Tuple of (class_output, domain_output):
+            - class_output: Label predictions (batch, num_classes) with LogSoftmax
+            - domain_output: Domain predictions (batch, 2) with LogSoftmax
+        """
+        # Extract and flatten features (feature extractor handles both)
+        feature = self.feature_extractor(input_data)
+
+        # Apply gradient reversal for domain classification
+        reverse_feature = ReverseLayerF.apply(feature, alpha)
+
+        # Class prediction (digit/task classification)
+        class_output = self.class_classifier(feature)
+
+        # Domain prediction (source vs target)
+        domain_output = self.domain_classifier(reverse_feature)
+
+        return class_output, domain_output
+
+    def get_feature_extractor(self) -> nn.Module:
+        """
+        Get the feature extractor module.
+
+        Returns:
+            Feature extractor network
+        """
+        return self.feature_extractor
+
+    def get_label_classifier(self) -> nn.Module:
+        """
+        Get the label classifier module.
+
+        Returns:
+            Label classifier network
+        """
+        return self.class_classifier
+
+    def get_domain_classifier(self) -> nn.Module:
+        """
+        Get the domain classifier module.
+
+        Returns:
+            Domain classifier network
+        """
+        return self.domain_classifier
 
 
 # ============================================
-# Lambda Schedule (from DANN paper)
+# Example Implementation Template
 # ============================================
-def compute_lambda_schedule(epoch, total_epochs, gamma=10.0, zeta=1.0):
+class ExampleDANNModel(AbstractDANN):
     """
-    Compute lambda parameter using schedule from DANN paper.
+    Example implementation template for creating new DANN models.
 
-    Lambda gradually increases from 0 to zeta during training following:
-        lambda_p = zeta * (2 / (1 + exp(-gamma * p)) - 1)
-
-    where p = epoch / total_epochs (training progress)
-
-    Args:
-        epoch: Current epoch (0-indexed)
-        total_epochs: Total number of training epochs
-        gamma: Sharpness of the schedule (default: 10.0 from paper)
-        zeta: Maximum adaptation strength in [0, 1] (default: 1.0)
-
-    Returns:
-        lambda_p: Adaptation strength in [0, zeta]
+    Copy this class and modify to create your own DANN model.
     """
-    import numpy as np
-    p = float(epoch) / float(total_epochs)
-    lambda_p = zeta * (2.0 / (1.0 + np.exp(-gamma * p)) - 1.0)
-    return lambda_p
+
+    def __init__(self, input_channels: int = 3, num_classes: int = 10):
+        """
+        Initialize example DANN model.
+
+        Args:
+            input_channels: Number of input channels (e.g., 3 for RGB)
+            num_classes: Number of label classes (e.g., 10 for digits)
+        """
+        self.input_channels = input_channels
+        self.num_classes = num_classes
+        super().__init__()
+
+    def _build_feature_extractor(self) -> nn.Module:
+        """
+        Build feature extractor (template - implement your architecture).
+        
+        Should output flattened features (batch, feature_dim).
+        """
+        # Example: Simple CNN with flattening
+        # return nn.Sequential(
+        #     nn.Conv2d(self.input_channels, 64, kernel_size=5),
+        #     nn.ReLU(),
+        #     nn.MaxPool2d(2),
+        #     # ... more layers ...
+        #     nn.Flatten(),  # Flatten to (batch, feature_dim)
+        # )
+        raise NotImplementedError("Subclass ExampleDANNModel and implement _build_feature_extractor()")
+
+    def _build_label_classifier(self) -> nn.Module:
+        """
+        Build label classifier (template - implement your architecture).
+        """
+        feature_dim = self._get_feature_dim()
+        # Example: MLP
+        # return nn.Sequential(
+        #     nn.Linear(feature_dim, 100),
+        #     nn.ReLU(),
+        #     nn.Linear(100, self.num_classes),
+        #     nn.LogSoftmax(dim=1)
+        # )
+        raise NotImplementedError("Subclass ExampleDANNModel and implement _build_label_classifier()")
+
+    def _build_domain_classifier(self) -> nn.Module:
+        """
+        Build domain classifier (template - implement your architecture).
+        """
+        feature_dim = self._get_feature_dim()
+        # Example: MLP for binary classification (source vs target)
+        # return nn.Sequential(
+        #     nn.Linear(feature_dim, 100),
+        #     nn.ReLU(),
+        #     nn.Linear(100, 2),
+        #     nn.LogSoftmax(dim=1)
+        # )
+        raise NotImplementedError("Subclass ExampleDANNModel and implement _build_domain_classifier()")
+
+    def _get_feature_dim(self) -> int:
+        """
+        Get flattened feature dimension (template - implement based on your architecture).
+        """
+        # Example: channels * height * width after feature extractor
+        # return 64 * 4 * 4  # Assuming 64 channels, 4x4 spatial size
+        raise NotImplementedError("Subclass ExampleDANNModel and implement _get_feature_dim()")
+
 
 
 if __name__ == "__main__":
-    # Test the model
-    print("=" * 60)
-    print("TESTING DOMAIN ADVERSARIAL NEURAL NETWORK")
-    print("=" * 60)
+    print("Abstract DANN Model Base Classes")
+    print("=" * 50)
+    print("\nTo create a new DANN model:")
+    print("1. Subclass AbstractDANN")
+    print("2. Implement required abstract methods:")
+    print("   - _build_feature_extractor() - should output flattened features (batch, feature_dim)")
+    print("   - _build_label_classifier()")
+    print("   - _build_domain_classifier()")
+    print("   - _get_feature_dim()")
+    print("\nThe forward() method is provided by the base class.")
+    print("\nExample:")
+    print("""
+    class MyDANNModel(AbstractDANN):
+        def _build_feature_extractor(self):
+            # Feature extractor should output flattened features
+            return nn.Sequential(
+                nn.Conv2d(3, 64, kernel_size=5),
+                nn.ReLU(),
+                nn.MaxPool2d(2),
+                nn.Conv2d(64, 50, kernel_size=5),
+                nn.ReLU(),
+                nn.MaxPool2d(2),
+                nn.Flatten(),  # Flatten to (batch, feature_dim)
+                # Or: nn.AdaptiveAvgPool2d(1), nn.Flatten()
+            )
+        
+        def _build_label_classifier(self):
+            feature_dim = self._get_feature_dim()
+            return nn.Sequential(...)
+        
+        def _build_domain_classifier(self):
+            feature_dim = self._get_feature_dim()
+            return nn.Sequential(...)
+        
+        def _get_feature_dim(self):
+            return 800
+    """)
 
-    # Create model
-    model = get_dann_model(
-        input_channels=3,
-        num_classes=1,
-        feature_hidden_size=256,
-        domain_hidden_size=256,
-        dropout=0.3
-    )
-
-    print(f"\nModel created successfully!")
-    print(f"Total parameters: {sum(p.numel() for p in model.parameters()):,}")
-
-    # Test forward pass
-    batch_size = 4
-    dummy_input = torch.randn(batch_size, 3, 224, 224)
-
-    print(f"\nTesting forward pass with input shape: {dummy_input.shape}")
-
-    # Test with different lambda values
-    for alpha in [0.0, 0.5, 1.0]:
-        label_out, domain_out = model(dummy_input, alpha=alpha)
-        print(f"\nLambda = {alpha:.1f}:")
-        print(f"  Label output shape: {label_out.shape}")
-        print(f"  Domain output shape: {domain_out.shape}")
-
-    # Test gradient reversal
-    print("\n" + "=" * 60)
-    print("Testing Gradient Reversal Layer")
-    print("=" * 60)
-
-    grl = GradientReversalLayer()
-    grl.lambda_ = 0.5
-
-    # Create dummy tensor with gradient tracking
-    x = torch.randn(4, 512, requires_grad=True)
-
-    # Forward pass
-    y = grl(x)
-    print(f"Forward pass: input shape {x.shape} → output shape {y.shape}")
-    print(f"Forward pass preserves values: {torch.allclose(x, y)}")
-
-    # Backward pass
-    loss = y.sum()
-    loss.backward()
-
-    print(f"Gradient is reversed: {torch.allclose(x.grad, -0.5 * torch.ones_like(x))}")
-
-    print("\n✓ All tests passed!")

@@ -177,7 +177,7 @@ class TrainingTracker:
             return total_norm ** 0.5 if param_count > 0 else 0.0
 
         # Track gradients for different components
-        feature_grad = get_grad_norm('feature_extractor', model.feature)
+        feature_grad = get_grad_norm('feature_extractor', model.feature_extractor)
         label_grad = get_grad_norm('label_classifier', model.class_classifier)
         domain_grad = get_grad_norm('domain_classifier', model.domain_classifier)
 
