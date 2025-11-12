@@ -114,24 +114,24 @@ class AbstractDANNLoader(ABC):
         """
         pass
     
-    def create_default_transform(self, image_size: int = 28, 
+    def create_default_transform(self, image_size: int = 28,
                                 normalize_mean: Tuple[float, float, float] = (0.5, 0.5, 0.5),
                                 normalize_std: Tuple[float, float, float] = (0.5, 0.5, 0.5),
                                 grayscale_to_rgb: bool = False) -> transforms.Compose:
         """
         Create a default transform pipeline for image preprocessing.
-        
+
         Args:
-            image_size: Target image size
+            image_size: Target image size (will be converted to (image_size, image_size))
             normalize_mean: Mean values for normalization (RGB channels)
             normalize_std: Std values for normalization (RGB channels)
             grayscale_to_rgb: Whether to convert grayscale to RGB (3 channels)
-            
+
         Returns:
             Composed transform pipeline
         """
         transform_list = [
-            transforms.Resize(image_size),
+            transforms.Resize((image_size, image_size)),  # Ensure square output size
         ]
         
         if grayscale_to_rgb:
@@ -189,23 +189,26 @@ def create_loader_function(loader_class: type, **init_kwargs) -> callable:
         class MyLoader(AbstractDANNLoader):
             def __init__(self, data_root='./data'):
                 self.data_root = data_root
-            def get_loaders(self, batch_size=64, image_size=28):
+            def get_loaders(self, batch_size=64, image_size=224):  # Custom default
                 # Implementation
                 return train_loader, test_loader
-        
-        # With default data_root
+
+        # With default data_root and loader's default image_size
         get_my_loaders = create_loader_function(MyLoader)
         train_loader, test_loader = get_my_loaders(batch_size=32)
-        
-        # With custom data_root
+
+        # With custom data_root and loader's default image_size
         get_my_loaders_custom = create_loader_function(MyLoader, data_root='./custom_data')
         train_loader, test_loader = get_my_loaders_custom(batch_size=32)
+
+        # Override image_size
+        train_loader, test_loader = get_my_loaders(batch_size=32, image_size=128)
     """
-    def loader_function(batch_size=64, image_size=28, **kwargs):
+    def loader_function(batch_size=64, **kwargs):
         loader_instance = loader_class(**init_kwargs)
-        return loader_instance.get_loaders(batch_size=batch_size, 
-                                          image_size=image_size, 
-                                          **kwargs)
+        # Only pass image_size if explicitly provided, otherwise let loader use its default
+        loader_kwargs = {'batch_size': batch_size, **kwargs}
+        return loader_instance.get_loaders(**loader_kwargs)
     return loader_function
 
 

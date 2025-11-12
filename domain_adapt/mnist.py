@@ -21,9 +21,10 @@ Architecture:
         │
         └→ [GRL] → Domain Classifier → MNIST/MNIST-M classification
 """
-from train_dann import *
-from loader_dann import AbstractDANNDataset, AbstractDANNLoader, create_loader_function
-from model_dann import AbstractDANN
+from dann.train_dann import *
+from dann.loader_dann import AbstractDANNDataset, AbstractDANNLoader, create_loader_function
+from dann.model_dann import AbstractDANN
+from PIL import Image
 # ============================================
 # DANN Model (CNN for MNIST)
 # ============================================
@@ -125,7 +126,7 @@ class MNISTM(AbstractDANNDataset):
     Images are stored as PNG files with labels in text files.
     """
 
-    def __init__(self, root, train=True, transform=None):
+    def __init__(self, root, train=True, transform=None, load_to_memory=True):
         """
         Initialize MNIST-M dataset.
 
@@ -133,6 +134,7 @@ class MNISTM(AbstractDANNDataset):
             root: Root directory containing MNIST-M data
             train: Whether to load training or test set
             transform: Optional transform to apply
+            load_to_memory: If True, load all images into memory at initialization
         """
         super().__init__(root, train, transform)
 
@@ -149,6 +151,16 @@ class MNISTM(AbstractDANNDataset):
                 img_name, label = line.strip().split()
                 self.samples.append((img_name, int(label)))
 
+        # Load to memory functionality
+        self.load_to_memory = load_to_memory
+        self._images_in_memory = None  # Will store loaded images if load_to_memory=True
+
+        # Load all images to memory if requested
+        if self.load_to_memory:
+            print("Loading all MNIST-M images to memory (this may take a while)...")
+            self._load_dataset_to_memory()
+            print("All MNIST-M images loaded to memory successfully.")
+
     def _check_exists(self):
         """Check if dataset files exist."""
         train_file = self.root / 'mnist_m_train_labels.txt'
@@ -158,16 +170,55 @@ class MNISTM(AbstractDANNDataset):
         return (train_file.exists() and test_file.exists() and
                 train_folder.exists() and test_folder.exists())
 
+    def _load_dataset_to_memory(self):
+        """Load all images into memory with transform applied."""
+        try:
+            from tqdm import tqdm
+        except ImportError:
+            tqdm = lambda x, desc: x  # Fallback if tqdm not available
+
+        self._images_in_memory = []
+
+        # Load all images
+        for idx in tqdm(range(len(self.samples)), desc="Loading MNIST-M images to memory"):
+            img_name, target = self.samples[idx]
+            img_path = self.image_folder / img_name
+
+            # Load image
+            try:
+                img = datasets.folder.pil_loader(img_path)
+            except Exception as e:
+                # If image loading fails, return a black PIL image
+                img = Image.new('RGB', (28, 28), color='black')
+                print(f"Error loading image {img_path}: {e}")
+
+            # Apply transform if provided
+            if self.transform is not None:
+                img = self.transform(img)
+
+            self._images_in_memory.append(img)
+
     def __getitem__(self, index):
         """Get a single item."""
         img_name, target = self.samples[index]
-        img_path = self.image_folder / img_name
 
-        # Load image
-        img = datasets.folder.pil_loader(img_path)
+        # Load image from memory or disk
+        if self._images_in_memory is not None and index < len(self._images_in_memory):
+            # Load from memory
+            img = self._images_in_memory[index]
+        else:
+            # Load from disk
+            img_path = self.image_folder / img_name
+            try:
+                img = datasets.folder.pil_loader(img_path)
+            except Exception as e:
+                # If image loading fails, return a black PIL image
+                img = Image.new('RGB', (28, 28), color='black')
+                print(f"Error loading image {img_path}: {e}")
 
-        if self.transform is not None:
-            img = self.transform(img)
+            # Apply transform if provided
+            if self.transform is not None:
+                img = self.transform(img)
 
         return img, target
 
@@ -193,13 +244,14 @@ class MNISTLoader(AbstractDANNLoader):
         """
         self.data_root = Path(data_root)
 
-    def get_loaders(self, batch_size=64, image_size=28, **kwargs):
+    def get_loaders(self, batch_size=64, image_size=28, load_to_memory=False, **kwargs):
         """
         Get MNIST data loaders.
 
         Args:
             batch_size: Batch size for data loading
             image_size: Image size (should be 28 for MNIST)
+            load_to_memory: If True, preload all images into memory (torchvision already caches, so minimal benefit)
             **kwargs: Additional arguments (unused for MNIST)
 
         Returns:
@@ -256,13 +308,14 @@ class MNISTMLoader(AbstractDANNLoader):
         """
         self.data_root = Path(data_root)
 
-    def get_loaders(self, batch_size=64, image_size=28, **kwargs):
+    def get_loaders(self, batch_size=64, image_size=28, load_to_memory=True, **kwargs):
         """
         Get MNIST-M data loaders.
 
         Args:
             batch_size: Batch size for data loading
             image_size: Image size (should be 28 for MNIST-M)
+            load_to_memory: If True, preload all images into memory at initialization
             **kwargs: Additional arguments (unused for MNIST-M)
 
         Returns:
@@ -278,13 +331,15 @@ class MNISTMLoader(AbstractDANNLoader):
         train_dataset = MNISTM(
             root=str(self.data_root / 'mnist_m'),
             train=True,
-            transform=transform
+            transform=transform,
+            load_to_memory=load_to_memory
         )
 
         test_dataset = MNISTM(
             root=str(self.data_root / 'mnist_m'),
             train=False,
-            transform=transform
+            transform=transform,
+            load_to_memory=load_to_memory
         )
 
         # Create data loaders
@@ -305,8 +360,14 @@ class MNISTMLoader(AbstractDANNLoader):
 # ============================================
 # Create function-style loaders from classes
 source_name, target_name = 'mnist', 'mnist_m'
-get_src_loaders = create_loader_function(MNISTLoader)
-get_tgt_loaders = create_loader_function(MNISTMLoader)
+
+def get_src_loaders(batch_size=64, **kwargs):
+    loader = MNISTLoader()
+    return loader.get_loaders(batch_size=batch_size, load_to_memory=False, **kwargs)  # MNIST is already cached by torchvision
+
+def get_tgt_loaders(batch_size=64, **kwargs):
+    loader = MNISTMLoader()
+    return loader.get_loaders(batch_size=batch_size, load_to_memory=True, **kwargs)  # MNIST-M benefits from preloading
 
 if __name__ == "__main__":
     train_dann(

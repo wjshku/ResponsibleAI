@@ -13,31 +13,29 @@ import time
 from pathlib import Path
 from tqdm import tqdm
 
-from utils import create_tracker, save_training_summary
-from model_dann import ReverseLayerF
+from dann.utils import create_tracker, save_training_summary
+from dann.model_dann import ReverseLayerF
 
 # ============================================
 # Lambda Schedule (from DANN paper)
 # ============================================
-def compute_lambda_schedule(epoch, total_epochs, gamma=10.0, zeta=1.0):
+def compute_lambda_schedule(p, gamma=10.0, zeta=1.0):
     """
     Compute lambda parameter using schedule from DANN paper.
 
     Lambda gradually increases from 0 to zeta during training following:
         lambda_p = zeta * (2 / (1 + exp(-gamma * p)) - 1)
 
-    where p = epoch / total_epochs (training progress)
+    where p = training_progress (0 to 1)
 
     Args:
-        epoch: Current epoch (0-indexed)
-        total_epochs: Total number of training epochs
+        p: Training progress in [0, 1] (can be fractional for intra-epoch updates)
         gamma: Sharpness of the schedule (default: 10.0 from paper)
         zeta: Maximum adaptation strength in [0, 1] (default: 1.0)
 
     Returns:
         lambda_p: Adaptation strength in [0, zeta]
     """
-    p = float(epoch) / float(total_epochs)
     lambda_p = zeta * (2.0 / (1.0 + np.exp(-gamma * p)) - 1.0)
     return lambda_p
 
@@ -45,7 +43,7 @@ def compute_lambda_schedule(epoch, total_epochs, gamma=10.0, zeta=1.0):
 # Training and Evaluation Functions
 # ============================================
 def step_dann_epoch(model, source_loader, target_loader, optimizer,
-                    loss_class, loss_domain, device, epoch, n_epoch, mode = 'train'):
+            loss_label, loss_domain, device, epoch, n_epoch, gamma, zeta, mode = 'train'):
     """
     Train DANN for one epoch.
 
@@ -54,11 +52,13 @@ def step_dann_epoch(model, source_loader, target_loader, optimizer,
         source_loader: DataLoader for source domain (MNIST)
         target_loader: DataLoader for target domain (MNIST-M)
         optimizer: Optimizer
-        loss_class: Classification loss function
+        loss_label: Label classification loss function
         loss_domain: Domain classification loss function
         device: Device (CPU/CUDA)
         epoch: Current epoch number
         n_epoch: Total number of epochs
+        gamma: Lambda schedule sharpness parameter
+        zeta: Maximum lambda value
 
     Returns:
         avg_src_label_loss: Average source label classification loss
@@ -107,7 +107,7 @@ def step_dann_epoch(model, source_loader, target_loader, optimizer,
     for batch_idx in pbar:
         # Calculate progress p and lambda
         p = float(batch_idx + epoch * len_dataloader) / total_batches
-        alpha = 2. / (1. + np.exp(-10 * p)) - 1
+        alpha = compute_lambda_schedule(p, gamma=gamma, zeta=zeta)
 
         # Forward pass
         model.zero_grad()
@@ -135,7 +135,7 @@ def step_dann_epoch(model, source_loader, target_loader, optimizer,
         src_label_output, src_domain_output = model(s_img, alpha)
 
         # Label loss (source domain = 0)
-        err_s_label = loss_class(src_label_output, s_label)
+        err_s_label = loss_label(src_label_output, s_label)
 
         # Domain loss (source domain = 0)
         src_domain_label = torch.zeros(batch_size).long().to(device)
@@ -161,7 +161,7 @@ def step_dann_epoch(model, source_loader, target_loader, optimizer,
         tgt_label_output, tgt_domain_output = model(t_img, alpha)
 
         # Label loss (for monitoring only, not part of total loss)
-        err_t_label = loss_class(tgt_label_output, t_label)
+        err_t_label = loss_label(tgt_label_output, t_label)
 
         # Domain loss (target domain = 1)
         tgt_domain_label = torch.ones(batch_size).long().to(device)
@@ -209,11 +209,19 @@ def step_dann_epoch(model, source_loader, target_loader, optimizer,
         running_avg_label_loss = total_src_label_loss / n_batches
         running_avg_domain_loss = total_domain_loss / n_batches
 
-        pbar.set_postfix({
-            'Class Loss': f'{running_avg_label_loss:.4f}',
-            'Domain Loss': f'{running_avg_domain_loss:.4f}',
-            'λ': f'{alpha:.3f}'
-        })
+        if mode == 'train':
+            pbar.set_postfix({
+                'Mode': 'Train',
+                'Label Loss': f'{running_avg_label_loss:.4f}',
+                'Domain Loss': f'{running_avg_domain_loss:.4f}',
+                'λ': f'{alpha:.3f}'
+            })
+        else:
+            pbar.set_postfix({
+                'Mode': 'Eval',
+                'Label Loss': f'{running_avg_label_loss:.4f}',
+                'Domain Loss': f'{running_avg_domain_loss:.4f}'
+            })
 
         # Refresh display immediately
         pbar.refresh()
@@ -236,15 +244,16 @@ def step_dann_epoch(model, source_loader, target_loader, optimizer,
 # ============================================
 # Main Training Function
 # ============================================
-def train_dann(source_name='mnist', 
-            get_src_loaders = None, 
-            target_name='mnist_m', 
-            get_tgt_loaders = None, 
+def train_dann(source_name='mnist',
+            get_src_loaders = None,
+            target_name='mnist_m',
+            get_tgt_loaders = None,
             input_model = None,
             n_epoch=100,
-            batch_size=64, 
-            lr=1e-3, 
-            save_interval=10, 
+            batch_size=64,
+            lr=1e-3,
+            save_interval=10,
+            gamma=10.0,
             zeta=1.0,
             save_dir=None):
     """
@@ -257,6 +266,7 @@ def train_dann(source_name='mnist',
         batch_size: Batch size
         lr: Learning rate
         save_interval: Save model every N epochs
+        gamma: Sharpness of the lambda schedule (default 10.0)
         zeta: Maximum adaptation strength (default 1.0)
     """
     print("=" * 70)
@@ -275,18 +285,13 @@ def train_dann(source_name='mnist',
 
     # Load data
     print("\nLoading data...")
-    if source_name == 'mnist':
-        source_train_loader, source_test_loader = get_src_loaders(batch_size=batch_size)
-    else:
-        raise ValueError(f"Unsupported source domain: {source_name}")
-
-    if target_name == 'mnist_m':
-        target_train_loader, target_test_loader = get_tgt_loaders(batch_size=batch_size)
-    else:
-        raise ValueError(f"Unsupported target domain: {target_name}")
+    source_train_loader, source_test_loader = get_src_loaders(batch_size=batch_size)
+    target_train_loader, target_test_loader = get_tgt_loaders(batch_size=batch_size)
 
     print(f"Source train size: {len(source_train_loader.dataset)}")
     print(f"Target train size: {len(target_train_loader.dataset)}")
+    print(f"Source test size: {len(source_test_loader.dataset)}")
+    print(f"Target test size: {len(target_test_loader.dataset)}")
 
     # Create model
     model = input_model()
@@ -294,12 +299,12 @@ def train_dann(source_name='mnist',
 
     # Setup optimizer and loss functions
     optimizer = optim.Adam(model.parameters(), lr=lr)
-    loss_class = nn.NLLLoss()
+    loss_label = nn.NLLLoss()
     loss_domain = nn.NLLLoss()
 
     # Move to device
     model = model.to(device)
-    loss_class = loss_class.to(device)
+    loss_label = loss_label.to(device)
     loss_domain = loss_domain.to(device)
 
     # Create training tracker (creates timestamped folder)
@@ -322,13 +327,13 @@ def train_dann(source_name='mnist',
         # Train for one epoch
         src_label_loss, tgt_label_loss, domain_loss, src_label_acc, tgt_label_acc, domain_acc = step_dann_epoch(
             model, source_train_loader, target_train_loader,
-            optimizer, loss_class, loss_domain, device, epoch, n_epoch
+            optimizer, loss_label, loss_domain, device, epoch, n_epoch, gamma, zeta
         )
 
         # Test for one epoch
         val_src_label_loss, val_tgt_label_loss, val_domain_loss, val_src_label_acc, val_tgt_label_acc, val_domain_acc = step_dann_epoch(
             model, source_test_loader, target_test_loader,
-            optimizer, loss_class, loss_domain, device, epoch, n_epoch, mode = 'eval'
+            optimizer, loss_label, loss_domain, device, epoch, n_epoch, gamma, zeta, mode = 'eval'
         )
         epoch_time = time.time() - epoch_start_time
 
@@ -346,7 +351,7 @@ def train_dann(source_name='mnist',
             val_label_target_acc=val_tgt_label_acc,
             val_domain_loss=val_domain_loss,  
             val_domain_accuracy=val_domain_acc,
-            lambda_value=compute_lambda_schedule(epoch, n_epoch, zeta=zeta),
+            lambda_value=compute_lambda_schedule(float(epoch) / n_epoch, gamma=gamma, zeta=zeta),
             epoch_time=epoch_time
         )
 
@@ -390,7 +395,9 @@ def train_dann(source_name='mnist',
         'n_epoch': n_epoch,
         'batch_size': batch_size,
         'learning_rate': lr,
-        'save_interval': save_interval
+        'save_interval': save_interval,
+        'gamma': gamma,
+        'zeta': zeta
     }
     save_training_summary(tracker, model, config)
 
