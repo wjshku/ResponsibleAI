@@ -99,7 +99,7 @@ class CarDDDataset(Dataset):
         Args:
             root: Root directory containing GenAI_Results
                   (default: '../cardd_data' locally, '~/ResponsibleAI/cardd_data' on EC2)
-            domain: Domain name ('sd2', 'kontext', or 'qwen')
+            domain: Domain name ('sd2', 'kontext', 'qwen', or 'sd2_kontext' for combined SD2+Kontext)
             train: Whether to load training or validation set (deprecated, use split instead)
             split: Dataset split name ('TR', 'VAL', or 'TE'). If None, uses train parameter
             transform: Optional transform to be applied on images
@@ -131,14 +131,18 @@ class CarDDDataset(Dataset):
         self.load_to_memory = load_to_memory
         self._images_in_memory = None  # Will store loaded images if load_to_memory=True
 
-        # Validate domain and map to correct folder name
+        # Validate domain and map to correct folder name(s)
         domain_mapping = {
-            'sd2': 'SD2',
-            'kontext': 'Kontext',
-            'qwen': 'Qwen Image Edit'
+            'sd2': ['SD2'],
+            'kontext': ['Kontext'],
+            'qwen': ['Qwen Image Edit'],
+            'sd2_kontext': ['SD2', 'Kontext']
         }
         if self.domain not in domain_mapping:
-            raise ValueError(f"Domain must be 'sd2', 'kontext', or 'qwen', got '{domain}'")
+            raise ValueError(f"Domain must be 'sd2', 'kontext', 'qwen', or 'sd2_kontext', got '{domain}'")
+
+        # Store the list of domain folders to load from
+        self.domain_folders = domain_mapping[self.domain]
 
         # Set split name - support TR, VAL, or TE
         if split is not None:
@@ -151,52 +155,67 @@ class CarDDDataset(Dataset):
             # Backward compatibility: use train parameter
             split_name = 'CarDD-TR' if train else 'CarDD-VAL'
 
-        # Construct data and metadata directories
-        self.data_dir = os.path.join(root, 'GenAI_Results', domain_mapping[self.domain], split_name)
-        self.metadata_dir = os.path.join(self.data_dir, 'metadata')
+        # Construct data and metadata directories for all domain folders
+        self.data_dirs = []
+        self.metadata_dirs = []
+        for domain_folder in self.domain_folders:
+            data_dir = os.path.join(root, 'GenAI_Results', domain_folder, split_name)
+            metadata_dir = os.path.join(data_dir, 'metadata')
+            self.data_dirs.append(data_dir)
+            self.metadata_dirs.append(metadata_dir)
 
-        if not self._check_exists():
-            raise RuntimeError(f'Dataset not found. Please ensure CARDD data is available at {self.data_dir} with metadata in {self.metadata_dir}')
+        # Check that at least one domain directory exists
+        existing_dirs = [d for d in self.data_dirs if os.path.exists(d)]
+        if not existing_dirs:
+            raise RuntimeError(f'No dataset directories found. Please ensure CARDD data is available in at least one of: {self.data_dirs}')
 
-        # Load samples from JSON files - each image becomes a separate sample
+        # Load samples from JSON files across all domain directories
         self.samples = []
         import glob
-        json_pattern = os.path.join(self.metadata_dir, 'processing_*.json')
-        json_files = glob.glob(json_pattern)
+        total_json_files = 0
 
-        print(f"Loading image paths from {len(json_files)} JSON files...")
+        print(f"Loading data from domains: {self.domain_folders}")
 
-        for json_file in json_files:
-            try:
-                with open(json_file, 'r') as f:
-                    metadata = json.load(f)
+        for metadata_dir in self.metadata_dirs:
+            if os.path.exists(metadata_dir):
+                json_pattern = os.path.join(metadata_dir, 'processing_*.json')
+                json_files = glob.glob(json_pattern)
+                total_json_files += len(json_files)
 
-                # Only process successful entries
-                if not metadata.get('success', False):
-                    continue
+                print(f"  Found {len(json_files)} JSON files in {os.path.basename(os.path.dirname(metadata_dir))}")
 
-                # Get processed image path
-                processed_path = metadata.get('processed_image_path', '')
-                if processed_path:
-                    # Extract just the filename from the path
-                    processed_filename = os.path.basename(processed_path)
-                    # Build full path using data_dir
-                    full_processed_path = os.path.join(self.data_dir, processed_filename)
+                for json_file in json_files:
+                    try:
+                        with open(json_file, 'r') as f:
+                            metadata = json.load(f)
 
-                    # Get original image path from metadata
-                    original_path = metadata.get('original_image_path', '')
+                        # Only process successful entries
+                        if not metadata.get('success', False):
+                            continue
 
-                    # Add original image sample (label 0)
-                    if original_path:
-                        self.samples.append((original_path, 0))
+                        # Get processed image path
+                        processed_path = metadata.get('processed_image_path', '')
+                        if processed_path:
+                            # Extract just the filename from the path
+                            processed_filename = os.path.basename(processed_path)
+                            # Build full path using the corresponding data directory
+                            data_dir_idx = self.metadata_dirs.index(metadata_dir)
+                            full_processed_path = os.path.join(self.data_dirs[data_dir_idx], processed_filename)
 
-                    # Add processed image sample (label 1) if it exists
-                    if os.path.exists(full_processed_path):
-                        self.samples.append((full_processed_path, 1))
+                            # Get original image path from metadata
+                            original_path = metadata.get('original_image_path', '')
 
-            except (json.JSONDecodeError, KeyError) as e:
-                # Skip invalid JSON files
-                continue
+                            # Add original image sample (label 0)
+                            if original_path:
+                                self.samples.append((original_path, 0))
+
+                            # Add processed image sample (label 1) if it exists
+                            if os.path.exists(full_processed_path):
+                                self.samples.append((full_processed_path, 1))
+
+                    except (json.JSONDecodeError, KeyError) as e:
+                        # Skip invalid JSON files
+                        continue
 
         # Apply sampling if requested
         if sample_size is not None and len(self.samples) > sample_size:
@@ -214,9 +233,13 @@ class CarDDDataset(Dataset):
     def _check_exists(self):
         """Check if dataset files exist."""
         import glob
-        return (os.path.exists(self.data_dir) and
-                os.path.exists(self.metadata_dir) and
-                len(glob.glob(os.path.join(self.metadata_dir, 'processing_*.json'))) > 0)
+        # Check if at least one data directory exists with valid metadata
+        for data_dir, metadata_dir in zip(self.data_dirs, self.metadata_dirs):
+            if (os.path.exists(data_dir) and
+                os.path.exists(metadata_dir) and
+                len(glob.glob(os.path.join(metadata_dir, 'processing_*.json'))) > 0):
+                return True
+        return False
 
     def _remap_path_for_ec2(self, image_path: str) -> str:
         """
@@ -249,15 +272,16 @@ class CarDDDataset(Dataset):
             return ec2_path
 
         # For GenAI processed images, they should already be in the correct location
-        # relative to the data_dir, but let's make sure
+        # relative to the data_dirs, but let's make sure
         if image_path.startswith('/'):
-            # Absolute path - check if it exists, if not try relative to data_dir
+            # Absolute path - check if it exists, if not try relative to data_dirs
             if not os.path.exists(image_path):
-                # Try relative to data_dir
+                # Try relative to each data_dir
                 rel_path = os.path.relpath(image_path, '/')
-                candidate_path = os.path.join(self.data_dir, rel_path)
-                if os.path.exists(candidate_path):
-                    return candidate_path
+                for data_dir in self.data_dirs:
+                    candidate_path = os.path.join(data_dir, rel_path)
+                    if os.path.exists(candidate_path):
+                        return candidate_path
 
         return image_path  # Return original if no remapping needed
     
@@ -283,7 +307,7 @@ class CarDDDataset(Dataset):
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
             # Apply transform if provided
-            if self.preprocess_transform is not None:
+            if self.transform is not None:
                 img = self.transform(img)
             self._images_in_memory.append(img)
 
@@ -326,9 +350,11 @@ class CarDDDataset(Dataset):
         """
         import glob
 
-        # Get all JSON files from metadata directory
-        json_pattern = os.path.join(self.metadata_dir, 'processing_*.json')
-        json_files = glob.glob(json_pattern)
+        # Get all JSON files from all metadata directories
+        json_files = []
+        for metadata_dir in self.metadata_dirs:
+            json_pattern = os.path.join(metadata_dir, 'processing_*.json')
+            json_files.extend(glob.glob(json_pattern))
 
         while True:
             json_file = random.choice(json_files)
@@ -341,10 +367,13 @@ class CarDDDataset(Dataset):
         original_path = metadata.get('original_image_path', '')
         processed_path = metadata.get('processed_image_path', '')
 
-        # Build full processed path
+        # Build full processed path - find the corresponding data directory
         if processed_path:
             processed_filename = os.path.basename(processed_path)
-            full_processed_path = os.path.join(self.data_dir, processed_filename)
+            # Find which metadata directory this JSON came from
+            json_dir = os.path.dirname(json_file)
+            data_dir_idx = self.metadata_dirs.index(json_dir)
+            full_processed_path = os.path.join(self.data_dirs[data_dir_idx], processed_filename)
         else:
             full_processed_path = ''
 

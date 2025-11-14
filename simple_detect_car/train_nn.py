@@ -232,8 +232,8 @@ def evaluate(model, test_loader, criterion, device):
 def main():
     """Main training function for neural network models."""
     parser = argparse.ArgumentParser(description='Train neural network for car damage detection')
-    parser.add_argument('--domain', type=str, default='sd2', choices=['sd2', 'kontext', 'qwen'],
-                       help='Training domain (default: sd2)')
+    parser.add_argument('--domain', type=str, default='sd2', choices=['sd2', 'kontext', 'qwen', 'sd2_kontext'],
+                       help='Training domain (default: sd2, use sd2_kontext for combined SD2+Kontext data)')
     parser.add_argument('--sample_size', type=int, default=None,
                        help='Sample size for training (default: None = full dataset)')
     parser.add_argument('--target_size', type=int, default=224,
@@ -246,8 +246,6 @@ def main():
                        help='Number of epochs (default: 20)')
     parser.add_argument('--model', type=str, default='cnn', choices=['vanilla', 'cnn'],
                        help='Model type (default: cnn)')
-    parser.add_argument('--hidden_size', type=int, default=256,
-                       help='Hidden size for model (default: 256)')
     parser.add_argument('--track_time', action='store_true', default=False,
                        help='Track and print timing information for each batch (default: False)')
 
@@ -278,7 +276,6 @@ def main():
         'learning_rate': args.learning_rate,
         'num_epochs': args.epochs,
         'model_name': args.model,
-        'hidden_size': args.hidden_size,
         'dropout': 0.2,
         'random_state': 42
     }
@@ -298,7 +295,7 @@ def main():
             domain=train_domain,
             train=True,  # Load from CarDD-TR
             sample_size=sample_size,
-            preprocess_transform=train_preprocess_transform,
+            transform=train_preprocess_transform,
             # augment_transform=train_augment_transform,
             random_seed=config['random_state']
         )
@@ -316,7 +313,7 @@ def main():
             domain=train_domain,
             train=False,  # Load from CarDD-VAL
             sample_size=val_sample_size,  # 500 samples if training on subset, full set otherwise
-            preprocess_transform=eval_transform,
+            transform=eval_transform,
             random_seed=config['random_state']
         )
         val_set_desc = f"{len(test_binary_dataset)} validation samples"
@@ -379,22 +376,9 @@ def main():
     # Create model
     print(f"\n5. Creating {config['model_name']} model...")
     
-    if config['model_name'] in ('vanilla'):
-        input_size = config['target_size'][0] * config['target_size'][1] * 3  # 224 * 224 * 3
+    if config['model_name'] in ('cnn'):
         model = get_model(
             model_name=config['model_name'],
-            input_size=input_size,
-            hidden_size=config['hidden_size'],
-            dropout=config['dropout'],
-            target_size=config['target_size']
-        ).to(device)
-        print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
-    else:
-        # CNN models handle their own preprocessing
-        model = get_model(
-            model_name=config['model_name'],
-            dropout=config['dropout'],
-            hidden_size=config['hidden_size']
         ).to(device)
         print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
     
@@ -527,7 +511,7 @@ def main():
     # Plot and save gradient norm curves
     try:
         grad_plot_path = model_dir / "gradient_norm_curve.png"
-        plot_training_curves(train_grad_norms, title="Gradient Norm During Training", save_path=grad_plot_path, show=False)
+        plot_training_curves(train_grad_norms, title="Gradient Norm During Training", ylabel="Gradient Norm", train_label="Gradient Norm", save_path=grad_plot_path, show=False)
     except Exception as e:
         print(f"Warning: failed to plot gradient curves: {e}")
     

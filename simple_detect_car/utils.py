@@ -59,13 +59,16 @@ def visualize_transforms(image_tensor, title: str):
 
 
 # ---------------------- Training Curves Plotting ----------------------
-def plot_training_curves(train_losses, val_losses=None, title: str = "Training and Validation Loss", save_path: Union[str, Path] = None, show: bool = True):
-    """Plot training loss (and optional validation loss) over epochs.
+def plot_training_curves(train_losses, val_losses=None, title: str = "Training and Validation Loss", ylabel: str = "Loss", train_label: str = "Train Loss", val_label: str = "Validation Loss", save_path: Union[str, Path] = None, show: bool = True):
+    """Plot training metrics (and optional validation metrics) over epochs.
 
     Args:
-        train_losses: List of training loss values per epoch.
-        val_losses: Optional list of validation/test loss values per epoch.
+        train_losses: List of training metric values per epoch.
+        val_losses: Optional list of validation/test metric values per epoch.
         title: Plot title.
+        ylabel: Y-axis label.
+        train_label: Legend label for training data.
+        val_label: Legend label for validation data.
         save_path: Optional file path to save the figure.
         show: If True, displays the plot window.
     """
@@ -74,16 +77,16 @@ def plot_training_curves(train_losses, val_losses=None, title: str = "Training a
 
     epochs = list(range(1, len(train_losses) + 1))
     plt.figure(figsize=(8, 5))
-    plt.plot(epochs, train_losses, label="Train Loss", marker="o")
+    plt.plot(epochs, train_losses, label=train_label, marker="o")
     if val_losses is not None and len(val_losses) == len(train_losses):
-        plt.plot(epochs, val_losses, label="Validation Loss", marker="s")
+        plt.plot(epochs, val_losses, label=val_label, marker="s")
     elif val_losses is not None:
         # Length mismatch; still plot but warn in console
         print("Warning: val_losses length doesn't match train_losses; plotting available points.")
         v_epochs = list(range(1, len(val_losses) + 1))
-        plt.plot(v_epochs, val_losses, label="Validation Loss", marker="s")
+        plt.plot(v_epochs, val_losses, label=val_label, marker="s")
     plt.xlabel("Epoch")
-    plt.ylabel("Loss")
+    plt.ylabel(ylabel)
     plt.title(title)
     plt.grid(True, linestyle='--', alpha=0.4)
     plt.legend()

@@ -219,8 +219,6 @@ def main():
     # Pull default hyperparameters from metadata when available
     cfg = metadata.get('config', {}) if metadata else {}
     meta_target_size = tuple(cfg.get('target_size')) if cfg.get('target_size') else (224, 224)
-    meta_dropout = float(cfg.get('dropout', 0.3))
-    meta_hidden = int(cfg.get('hidden_size', 256))
 
     # Choose target size (default to training metadata)
     ts_in = input(f"Target size H W [{meta_target_size[0]} {meta_target_size[1]}]: ").strip()
@@ -251,7 +249,7 @@ def main():
             ds = CarDDDataset(
                 domain=domain_lower,
                 split=split_param,
-                preprocess_transform=eval_transform,
+                transform=eval_transform,
                 sample_size=None,
                 load_to_memory=False  # Don't load to memory for evaluation
             )
@@ -278,27 +276,9 @@ def main():
     loader = create_dataloader(dataset, batch_size=batch_size, shuffle=False)
 
     # Reconstruct model
-    if model_name == "vanilla":
-        # vanilla depends on input_size and (optionally) target_size
-        ts = chosen_target_size
-        input_size = ts[0] * ts[1] * 3
-        model = get_model(model_name="vanilla", input_size=input_size, hidden_size=meta_hidden, dropout=meta_dropout, target_size=ts)
-        # Choose best or final weight path
-        state_path = None
-        if use_best:
-            if metadata and metadata.get('best_model_file'):
-                candidate = model_dir / metadata['best_model_file']
-                if candidate.exists():
-                    state_path = candidate
-            if state_path is None:
-                candidate = model_dir / "vanilla_best.pth"
-                if candidate.exists():
-                    state_path = candidate
-        if state_path is None:
-            state_path = model_dir / "vanilla_model.pth"
-    else:
+    if model_name == "cnn":
         # cnn depends on classifier hidden_size and dropout
-        model = get_model(model_name="cnn", dropout=meta_dropout, hidden_size=meta_hidden)
+        model = get_model(model_name="cnn",)
         state_path = None
         if use_best:
             if metadata and metadata.get('best_model_file'):
