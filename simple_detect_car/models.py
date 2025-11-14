@@ -69,60 +69,51 @@ class VanillaClassifier(nn.Module):
 
 
 class CNNClassifier(nn.Module):
-    """Convolutional Neural Network for binary classification.
+    """Convolutional Neural Network for binary classification using DANN architecture.
 
-    hidden_size controls the width of the classifier MLP after the conv backbone.
+    Based on the CARDDModel architecture from domain_adapt/cardd.py.
+    Uses a ResNet-like backbone with larger first kernel and adaptive pooling.
     """
-    
+
     def __init__(self, input_channels: int = 3, num_classes: int = 1, dropout: float = 0.5, hidden_size: int = 256):
         super(CNNClassifier, self).__init__()
-        
-        # Convolutional layers
+
+        # Feature extractor
         self.features = nn.Sequential(
-            # First conv block
-            nn.Conv2d(input_channels, 32, kernel_size=3, padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2, 2),  # 224x224 -> 112x112
-            
-            # Second conv block
-            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            # First conv block - larger kernel like ResNet
+            nn.Conv2d(input_channels, 64, kernel_size=7, stride=2, padding=3),
             nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(2, 2),  # 112x112 -> 56x56
-            
-            # Third conv block
-            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
+
+            # Second conv block
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
             nn.BatchNorm2d(128),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(2, 2),  # 56x56 -> 28x28
-            
-            # Fourth conv block
-            nn.Conv2d(128, 256, kernel_size=3, padding=1),
+            nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
+
+            # Third conv block
+            nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1),
             nn.BatchNorm2d(256),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(2, 2),  # 28x28 -> 14x14
-            
-            # Fifth conv block
-            nn.Conv2d(256, 512, kernel_size=3, padding=1),
-            nn.BatchNorm2d(512),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2, 2),  # 14x14 -> 7x7
+            nn.AdaptiveAvgPool2d((4, 4)),  # Adaptive pooling to fixed size
+
+            # Flatten
+            nn.Flatten()
         )
-        
-        # Classifier head (configurable width)
-        reduced_size = max(hidden_size // 4, 16)
+
+        # Classifier head (from DANN architecture)
+        feature_dim = 256 * 4 * 4  # 256 features after adaptive pooling
         self.classifier = nn.Sequential(
-            nn.AdaptiveAvgPool2d((1, 1)),  # Global average pooling
-            nn.Flatten(),
-            nn.Dropout(dropout),
-            nn.Linear(512, hidden_size),
+            nn.Linear(feature_dim, 512),
+            nn.BatchNorm1d(512),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
-            nn.Linear(hidden_size, reduced_size),
+            nn.Linear(512, 256),
+            nn.BatchNorm1d(256),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
-            nn.Linear(reduced_size, num_classes),
+            nn.Linear(256, num_classes),
             nn.Sigmoid()
         )
     
@@ -151,12 +142,10 @@ class CNNClassifier(nn.Module):
             else:
                 x_nchw = x
 
-        # Apply convolutional features
+        # Apply feature extraction and classification
         x_features = self.features(x_nchw)
-        
-        # Apply classifier
         x_out = self.classifier(x_features)
-        
+
         return x_out
 
 

@@ -63,7 +63,7 @@ fi
 # ============================================
 echo ""
 echo "Select training type to download:"
-echo "  [1] DANN (domain_adapt)"
+echo "  [1] DANN (domain_adapt/models_cardd)"
 echo "  [2] MNIST DANN (domain_adapt/models_mnist)"
 echo "  [3] Simple Detect CNN/MLP (simple_detect_car)"
 echo ""
@@ -73,6 +73,7 @@ echo ""
 case $TRAINING_TYPE in
     1)
         TRAINING_DIR="domain_adapt"
+        MODEL_SUBDIR="models_cardd"
         MODEL_PATTERN="model_dann_*"
         ;;
     2)

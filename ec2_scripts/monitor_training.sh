@@ -135,14 +135,49 @@ case $CHOICE in
     1)
         echo "Following training log (Ctrl+C to exit)..."
         echo ""
+
+        # Check if log file exists
+        LOG_EXISTS=$(ssh -i "$EC2_KEY_PATH" "$EC2_SSH_USER@$EC2_PUBLIC_IP" \
+            "cd ~/ResponsibleAI/$TRAINING_DIR && [ -f $LOG_FILE ] && echo 'exists' || echo 'not_found'")
+
+        if [ "$LOG_EXISTS" = "not_found" ]; then
+            echo "⚠️  Training log not found: $LOG_FILE"
+            echo ""
+            echo "This usually means:"
+            echo "• Training is still starting up"
+            echo "• Training is waiting for interactive input (domain selection)"
+            echo "• Screen session may not have fully initialized yet"
+            echo ""
+            echo "💡 Try these options:"
+            echo "• Wait a moment and try again"
+            echo "• Use option [5] to attach to the screen session directly"
+            echo "• Use option [3] to check GPU status to verify training is running"
+            echo ""
+            echo "Press Enter to continue..."
+            read
+            continue
+        fi
+
         ssh -i "$EC2_KEY_PATH" "$EC2_SSH_USER@$EC2_PUBLIC_IP" \
             "cd ~/ResponsibleAI/$TRAINING_DIR && tail -f $LOG_FILE"
         ;;
     2)
         echo "Last 50 lines:"
         echo ""
-        ssh -i "$EC2_KEY_PATH" "$EC2_SSH_USER@$EC2_PUBLIC_IP" \
-            "cd ~/ResponsibleAI/$TRAINING_DIR && tail -50 $LOG_FILE"
+
+        # Check if log file exists
+        LOG_EXISTS=$(ssh -i "$EC2_KEY_PATH" "$EC2_SSH_USER@$EC2_PUBLIC_IP" \
+            "cd ~/ResponsibleAI/$TRAINING_DIR && [ -f $LOG_FILE ] && echo 'exists' || echo 'not_found'")
+
+        if [ "$LOG_EXISTS" = "not_found" ]; then
+            echo "⚠️  Training log not found: $LOG_FILE"
+            echo ""
+            echo "The training session may still be initializing or waiting for input."
+            echo "Try option [5] to attach directly to the screen session."
+        else
+            ssh -i "$EC2_KEY_PATH" "$EC2_SSH_USER@$EC2_PUBLIC_IP" \
+                "cd ~/ResponsibleAI/$TRAINING_DIR && tail -50 $LOG_FILE"
+        fi
         ;;
     3)
         echo "GPU Status:"
@@ -152,11 +187,19 @@ case $CHOICE in
     4)
         echo "Training Summary:"
         echo ""
+
         ssh -i "$EC2_KEY_PATH" "$EC2_SSH_USER@$EC2_PUBLIC_IP" << EOFSUM
 cd ~/ResponsibleAI/$TRAINING_DIR
 
 if [ ! -f $LOG_FILE ]; then
-    echo "No training log found"
+    echo "⚠️  Training log not found: $LOG_FILE"
+    echo ""
+    echo "The training session may still be initializing."
+    echo "Try option [5] to attach directly to provide initial input."
+    echo ""
+    echo "GPU Status (if training is running):"
+    echo "─────────────────────────────────────────────────────────────────"
+    nvidia-smi --query-gpu=utilization.gpu,utilization.memory,temperature.gpu --format=csv,noheader || echo "No GPU information available"
     exit 0
 fi
 

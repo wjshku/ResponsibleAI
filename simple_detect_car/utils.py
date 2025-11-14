@@ -188,7 +188,7 @@ def save_pytorch_model(model, model_name: str, results: Dict[str, Any],
         f.write(f"Type: PyTorch\n")
         f.write(f"Timestamp: {metadata['timestamp']}\n")
         f.write(f"Parameters: {metadata['model_parameters']:,}\n")
-        f.write(f"Best Test Accuracy: {results.get('best_test_acc', 'N/A'):.2f}%\n")
+        f.write(f"Best Test Accuracy: {results.get('best_val_acc', 'N/A'):.2f}%\n")
         f.write(f"Final Train Loss: {results.get('train_losses', [0])[-1]:.4f}\n")
         f.write(f"Final Train Accuracy: {results.get('train_accuracies', [0])[-1]:.2f}%\n")
         f.write(f"Final Test Loss: {results.get('test_losses', [0])[-1]:.4f}\n")

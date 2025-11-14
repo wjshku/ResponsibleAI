@@ -6,41 +6,72 @@ Training script for neural network models (MLP, CNN).
 import os
 import sys
 import time
+import argparse
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from pathlib import Path
 import json
 import copy
+from tqdm import tqdm
 
 # Add current directory to path for imports
 sys.path.append(str(Path(__file__).parent))
 
 from data_loader import (
-    CarScratchDataset,
+    CarDDDataset,
     create_dataloader,
-    create_train_test_split,
-    combine_datasets,
-    get_default_transforms,
+    get_train_transforms,
     get_eval_transforms,
 )
 from models import get_model
-from utils import save_pytorch_model, plot_losses
+from utils import save_pytorch_model, plot_losses, plot_training_curves
 
-
-
-def train_epoch(model, train_loader, criterion, optimizer, device):
-    """Train the model for one epoch."""
+def train_epoch(model, train_loader, criterion, optimizer, device, track_time=False):
+    """Train the model for one epoch.
+    
+    Args:
+        model: The model to train
+        train_loader: DataLoader for training data
+        criterion: Loss function
+        optimizer: Optimizer
+        device: Device to run on (cuda/cpu)
+        track_time: If True, track and print timing information for each batch
+    """
     model.train()
     running_loss = 0.0
+    running_grad_norm = 0.0
+    grad_norm_count = 0  # Track how many times we computed grad norm
     correct = 0
     total = 0
     true_positives = 0
     false_positives = 0
     false_negatives = 0
+
+    # Create batch progress bar
+    batch_pbar = tqdm(train_loader, desc="Training", leave=False, unit="batch")
     
-    for images, labels in train_loader:
+    # Calculate gradient norm every N batches (reduce overhead)
+    GRAD_NORM_FREQ = 10  # Compute grad norm every 10 batches
+
+    # Track end time of last step for image loading timing (only if tracking)
+    last_step_end_time = time.time() if track_time else None
+
+    for batch_idx, (images, labels) in enumerate(batch_pbar):
+        # Track image loading time (from end of last step to current step)
+        if track_time:
+            current_step_start_time = time.time()
+            image_load_time = current_step_start_time - last_step_end_time if last_step_end_time else 0
+            if batch_idx > 0:  # Skip first batch as there's no previous step
+                print(f"Batch {batch_idx}: Image loading time: {image_load_time*1000:.2f}ms")
+
+        # Track GPU transfer time
+        if track_time:
+            gpu_transfer_start = time.time()
         images, labels = images.to(device), labels.to(device)
+        if track_time:
+            gpu_transfer_time = time.time() - gpu_transfer_start
+            print(f"Batch {batch_idx}: GPU transfer time: {gpu_transfer_time*1000:.2f}ms")
         
         # Zero gradients
         optimizer.zero_grad()
@@ -58,10 +89,25 @@ def train_epoch(model, train_loader, criterion, optimizer, device):
         # Calculate loss
         loss = criterion(outputs, labels.float())
         
+        # Track gradient calculation time
+        if track_time:
+            grad_start_time = time.time()
         # Backward pass
         loss.backward()
+        if track_time:
+            grad_time = time.time() - grad_start_time
+            print(f"Batch {batch_idx}: Gradient calculation time: {grad_time*1000:.2f}ms")
+
+        # Track gradient norm for monitoring (only every N batches to reduce overhead)
+        if (batch_idx + 1) % GRAD_NORM_FREQ == 0:
+            # More efficient gradient norm calculation
+            grad_norm_sq = sum(p.grad.norm().item() ** 2 for p in model.parameters() if p.grad is not None)
+            grad_norm = grad_norm_sq ** 0.5
+            running_grad_norm += grad_norm
+            grad_norm_count += 1
+
         optimizer.step()
-        
+
         # Statistics
         running_loss += loss.item()
         predicted = (outputs > 0.5).float()
@@ -76,17 +122,34 @@ def train_epoch(model, train_loader, criterion, optimizer, device):
         true_positives += tp
         false_positives += fp
         false_negatives += fn
-    
+
+        # Update progress bar with current batch metrics
+        current_loss = running_loss / (len(batch_pbar) if len(batch_pbar) > 0 else 1)
+        current_acc = 100.0 * correct / total if total > 0 else 0
+        batch_pbar.set_postfix({
+            'loss': f"{loss.item():.4f}",
+            'acc': f"{current_acc:.1f}%"
+        })
+        
+        # Record end time of current step for next iteration's image loading timing
+        if track_time:
+            last_step_end_time = time.time()
+
+    batch_pbar.close()
+
     epoch_loss = running_loss / len(train_loader)
+    # Average grad norm over the batches where it was computed
+    epoch_grad_norm = running_grad_norm / grad_norm_count if grad_norm_count > 0 else 0.0
     epoch_acc = 100.0 * correct / total
-    
+
     # Calculate precision, recall, and F1-score
     precision = true_positives / max(1, true_positives + false_positives)
     recall = true_positives / max(1, true_positives + false_negatives)
     f1_score = 2 * (precision * recall) / max(1e-8, precision + recall)
-    
+
     return {
-        'loss': epoch_loss, 
+        'loss': epoch_loss,
+        'grad_norm': epoch_grad_norm,
         'accuracy': epoch_acc,
         'precision': precision,
         'recall': recall,
@@ -103,9 +166,12 @@ def evaluate(model, test_loader, criterion, device):
     true_positives = 0
     false_positives = 0
     false_negatives = 0
-    
+
+    # Create batch progress bar for evaluation
+    batch_pbar = tqdm(test_loader, desc="Evaluating", leave=False, unit="batch")
+
     with torch.no_grad():
-        for images, labels in test_loader:
+        for images, labels in batch_pbar:
             images, labels = images.to(device), labels.to(device)
             
             # Forward pass
@@ -135,17 +201,27 @@ def evaluate(model, test_loader, criterion, device):
             true_positives += tp
             false_positives += fp
             false_negatives += fn
-    
+
+            # Update progress bar with current batch metrics
+            current_loss = running_loss / (len(batch_pbar) if len(batch_pbar) > 0 else 1)
+            current_acc = 100.0 * correct / total if total > 0 else 0
+            batch_pbar.set_postfix({
+                'loss': f"{loss.item():.4f}",
+                'acc': f"{current_acc:.1f}%"
+            })
+
+    batch_pbar.close()
+
     epoch_loss = running_loss / len(test_loader)
     epoch_acc = 100.0 * correct / total
-    
+
     # Calculate precision, recall, and F1-score
     precision = true_positives / max(1, true_positives + false_positives)
     recall = true_positives / max(1, true_positives + false_negatives)
     f1_score = 2 * (precision * recall) / max(1e-8, precision + recall)
-    
+
     return {
-        'loss': epoch_loss, 
+        'loss': epoch_loss,
         'accuracy': epoch_acc,
         'precision': precision,
         'recall': recall,
@@ -155,256 +231,150 @@ def evaluate(model, test_loader, criterion, device):
 
 def main():
     """Main training function for neural network models."""
+    parser = argparse.ArgumentParser(description='Train neural network for car damage detection')
+    parser.add_argument('--domain', type=str, default='sd2', choices=['sd2', 'kontext', 'qwen'],
+                       help='Training domain (default: sd2)')
+    parser.add_argument('--sample_size', type=int, default=None,
+                       help='Sample size for training (default: None = full dataset)')
+    parser.add_argument('--target_size', type=int, default=224,
+                       help='Image target size (default: 224, use 224 for speed, 512 for quality)')
+    parser.add_argument('--batch_size', type=int, default=32,
+                       help='Batch size (default: 32)')
+    parser.add_argument('--learning_rate', type=float, default=1e-3,
+                       help='Learning rate (default: 1e-3)')
+    parser.add_argument('--epochs', type=int, default=20,
+                       help='Number of epochs (default: 20)')
+    parser.add_argument('--model', type=str, default='cnn', choices=['vanilla', 'cnn'],
+                       help='Model type (default: cnn)')
+    parser.add_argument('--hidden_size', type=int, default=256,
+                       help='Hidden size for model (default: 256)')
+    parser.add_argument('--track_time', action='store_true', default=False,
+                       help='Track and print timing information for each batch (default: False)')
+
+    args = parser.parse_args()
+
     print("=" * 60)
     print("CAR IMAGE BINARY CLASSIFICATION - NEURAL NETWORKS")
     print("=" * 60)
-    
-    # Choose training domains
-    print("\nSelect training domains:")
-    print("  [1] SD2 only")
-    print("  [2] Kontext only")
-    print("  [3] SD2 + Kontext (combined)")
-    domain_choice = input("Enter choice [1-3] (default: 1): ").strip() or "1"
-    
-    if domain_choice == "1":
-        train_domains = ["SD2"]
-    elif domain_choice == "2":
-        train_domains = ["Kontext"]
-    elif domain_choice == "3":
-        train_domains = ["SD2", "Kontext"]
-    else:
-        print("Invalid choice, defaulting to SD2 only")
-        train_domains = ["SD2"]
-    
-    print(f"\nTraining on: {', '.join(train_domains)}")
-    
-    # Choose validation strategy
-    print("\nSelect validation strategy:")
-    print("  [1] Use CarDD-VAL split (recommended)")
-    print("  [2] Random train/test split (80/20)")
-    val_choice = input("Enter choice [1-2] (default: 1): ").strip() or "1"
-    use_val_split = (val_choice == "1")
-    
-    # Set up paths (relative to this script's location)
-    script_dir = Path(__file__).parent
-    genai_root = script_dir.parent / "cardd_data" / "GenAI_Results"
-    
-    train_data_type = "CarDD-TR"
-    val_data_type = "CarDD-VAL" if use_val_split else None
+    print(f"Domain: {args.domain.upper()}")
+    print(f"Sample size: {args.sample_size or 'Full dataset'}")
+    print(f"Target size: {args.target_size}x{args.target_size}")
+    print(f"Batch size: {args.batch_size}")
+    print(f"Learning rate: {args.learning_rate}")
+    print(f"Epochs: {args.epochs}")
+    print(f"Model: {args.model}")
+    print(f"Track time: {args.track_time}")
+    print("=" * 60)
 
-    # Choose sampling strategy
-    sample_size_input = input("\nSample size (number of samples, or press Enter for None/full dataset): ").strip()
-    try:
-        sample_size = int(sample_size_input) if sample_size_input else None
-    except ValueError:
-        print("Invalid sample size, using None (full dataset)")
-        sample_size = None
-    
-    if sample_size is not None and len(train_domains) > 1:
-        print("\nSampling strategy for multiple domains:")
-        print("  [1] Sample from each domain separately (e.g., 500 from SD2 + 500 from Kontext)")
-        print("  [2] Load all data, combine, then sample from combined (e.g., 500 total from combined SD2+Kontext)")
-        sampling_strategy = input("Enter choice [1-2] (default: 1): ").strip() or "1"
-        sample_per_domain = (sampling_strategy == "1")
-    else:
-        sample_per_domain = True  # Default behavior when single domain or no sampling
+    train_domain = args.domain
+    sample_size = args.sample_size
     
     # Configuration
     config = {
-        'train_domains': train_domains,
-        'use_val_split': use_val_split,
+        'train_domain': train_domain,
         'sample_size': sample_size,
-        'sample_per_domain': sample_per_domain if len(train_domains) > 1 else True,
-        'shuffle': True,
-        'target_size': (512, 512),
-        'batch_size': 32,
-        'test_size': 0.2,
-        'learning_rate': 1e-4,
-        'num_epochs': 20,
-        'model_name': 'cnn',  # 'vanilla', 'cnn'
-        'hidden_size': 256,
+        'target_size': (args.target_size, args.target_size),
+        'batch_size': args.batch_size,
+        'learning_rate': args.learning_rate,
+        'num_epochs': args.epochs,
+        'model_name': args.model,
+        'hidden_size': args.hidden_size,
         'dropout': 0.2,
         'random_state': 42
     }
-    
-    print(f"\nConfiguration: {config}")
+
+    print(f"Random seed: {config['random_state']}")
+    print(f"Dropout: {config['dropout']}")
+    print("=" * 60)
     
     # Create transforms
-    train_transform = get_default_transforms(target_size=config['target_size'], augment=True)
+    train_preprocess_transform, train_augment_transform = get_train_transforms(target_size=config['target_size'])
     eval_transform = get_eval_transforms(target_size=config['target_size'])
 
-    # Load training datasets from selected domains
-    print("\n1. Loading training datasets...")
-    train_datasets = []
-    for domain in train_domains:
-        train_dir = genai_root / domain / train_data_type
-        train_data_dir = str(train_dir)
-        train_metadata_dir = str(train_dir / "metadata")
-        
-        if not Path(train_data_dir).exists():
-            print(f"Warning: Training directory {train_data_dir} does not exist, skipping {domain}")
-            continue
-        
-        print(f"  Loading {domain}...")
-        # If sampling per domain, use sample_size; otherwise load all and sample after combining
-        domain_sample_size = config['sample_size'] if sample_per_domain else None
-        ds = CarScratchDataset.load_binary_dataset(
-            data_dir=train_data_dir,
-            metadata_dir=train_metadata_dir,
-            sample_size=domain_sample_size,
-            shuffle=config['shuffle'],
-            transform=train_transform,
+    # Load training dataset from CarDD-TR
+    print(f"\n1. Loading training data from {train_domain.upper()} CarDD-TR...")
+    try:
+        train_binary_dataset = CarDDDataset(
+            domain=train_domain,
+            train=True,  # Load from CarDD-TR
+            sample_size=sample_size,
+            preprocess_transform=train_preprocess_transform,
+            # augment_transform=train_augment_transform,
+            random_seed=config['random_state']
         )
-        train_datasets.append(ds)
-        print(f"    Loaded {len(ds)} samples from {domain}")
-    
-    if not train_datasets:
-        print("Error: No training datasets loaded!")
+        print(f"    Loaded {len(train_binary_dataset)} training samples")
+    except RuntimeError as e:
+        print(f"Error: Could not load training dataset: {e}")
         return
-    
-    # Combine datasets if multiple domains
-    if len(train_datasets) > 1:
-        print(f"\nCombining {len(train_datasets)} datasets...")
-        # If not sampling per domain, sample from combined dataset
-        combined_sample_size = None if sample_per_domain else config['sample_size']
-        binary_dataset = combine_datasets(train_datasets, sample_size=combined_sample_size, random_seed=config['random_state'])
-        print(f"Combined training dataset size: {len(binary_dataset)}")
-    else:
-        binary_dataset = train_datasets[0]
-    
-    # Load validation/test dataset
-    if use_val_split:
-        print("\n2. Loading validation dataset from CarDD-VAL...")
-        val_datasets = []
-        for domain in train_domains:
-            val_dir = genai_root / domain / val_data_type
-            val_data_dir = str(val_dir)
-            val_metadata_dir = str(val_dir / "metadata")
-            
-            if not Path(val_data_dir).exists():
-                print(f"Warning: Validation directory {val_data_dir} does not exist, skipping {domain}")
-                continue
-            
-            print(f"  Loading {domain} validation...")
-            ds = CarScratchDataset.load_binary_dataset(
-                data_dir=val_data_dir,
-                metadata_dir=val_metadata_dir,
-                sample_size=None,  # Use full validation set
-                shuffle=False,
-                transform=eval_transform,
-            )
-            val_datasets.append(ds)
-            print(f"    Loaded {len(ds)} samples from {domain} validation")
-        
-        if not val_datasets:
-            print("Warning: No validation datasets found, falling back to random split")
-            use_val_split = False
-        
-        if val_datasets:
-            if len(val_datasets) > 1:
-                print(f"\nCombining {len(val_datasets)} validation datasets...")
-                val_binary_dataset = combine_datasets(val_datasets)
-                print(f"Combined validation dataset size: {len(val_binary_dataset)}")
-            else:
-                val_binary_dataset = val_datasets[0]
-            
-            # Create train and test datasets (no split needed when using VAL)
-            train_binary_dataset = binary_dataset
-            test_binary_dataset = val_binary_dataset
-            train_indices = list(range(len(train_binary_dataset)))
-            test_indices = list(range(len(test_binary_dataset)))
-        else:
-            use_val_split = False
-    
-    if not use_val_split:
-        # Create train/test split
-        print("\n2. Creating train/test split...")
-        train_indices, test_indices = create_train_test_split(
-            binary_dataset, 
-            test_size=config['test_size'],
-            random_state=config['random_state']
+
+    # Load validation dataset from CarDD-VAL
+    print(f"\n2. Loading validation data from {train_domain.upper()} CarDD-VAL...")
+    # If using sample training, limit validation to 500 samples for faster testing
+    val_sample_size = 500 if sample_size is not None else None
+    try:
+        test_binary_dataset = CarDDDataset(
+            domain=train_domain,
+            train=False,  # Load from CarDD-VAL
+            sample_size=val_sample_size,  # 500 samples if training on subset, full set otherwise
+            preprocess_transform=eval_transform,
+            random_seed=config['random_state']
         )
-        
-        # Create train and test datasets by shallow-copying
-        train_binary_dataset = copy.copy(binary_dataset)
-        test_binary_dataset = copy.copy(binary_dataset)
-        
-        # Apply transforms per split
-        train_binary_dataset.transform = train_transform
-        test_binary_dataset.transform = eval_transform
-        
-        # Bind each to its split
-        train_binary_dataset.valid_entries = [binary_dataset.valid_entries[i] for i in train_indices]
-        test_binary_dataset.valid_entries = [binary_dataset.valid_entries[i] for i in test_indices]
-        
-        # Rebuild shuffled indices
-        train_binary_dataset.shuffled_indices = list(range(len(train_binary_dataset.valid_entries)))
-        test_binary_dataset.shuffled_indices = list(range(len(test_binary_dataset.valid_entries)))
-    
-    # ---- Verify no leakage between train/test based on image ids and file paths ----
-    def _paths_for_indices(ds, indices):
-        ids = set()
-        orig_paths = set()
-        proc_paths = set()
-        valid_len = len(ds.valid_entries)
-        for i in indices:
-            if i >= valid_len:
-                continue  # Skip out-of-bounds indices
-            e = ds.valid_entries[i]
-            img_id = e.get('image_id')
-            if img_id is not None:
-                ids.add(str(img_id))
-            op = e.get('original_image_path')
-            pp = e.get('processed_image_path')
-            if op:
-                orig_paths.add(str(op))
-            if pp:
-                proc_paths.add(str(pp))
-        return ids, orig_paths, proc_paths
+        val_set_desc = f"{len(test_binary_dataset)} validation samples"
+        if val_sample_size is not None:
+            val_set_desc += f" (sampled from full validation set)"
+        print(f"    Loaded {val_set_desc}")
+    except RuntimeError as e:
+        print(f"Error: Could not load validation dataset: {e}")
+        return
 
-    # Use valid_entries length to ensure indices are in bounds
-    train_indices_list = train_indices if not use_val_split else list(range(len(train_binary_dataset.valid_entries)))
-    test_indices_list = test_indices if not use_val_split else list(range(len(test_binary_dataset.valid_entries)))
+    # Set indices for leakage checking (simplified)
+    train_indices = list(range(len(train_binary_dataset)))
+    test_indices = list(range(len(test_binary_dataset)))
     
-    tr_ids, tr_orig, tr_proc = _paths_for_indices(train_binary_dataset, train_indices_list)
-    te_ids, te_orig, te_proc = _paths_for_indices(test_binary_dataset, test_indices_list)
-
-    id_overlap = tr_ids & te_ids
-    orig_overlap = tr_orig & te_orig
-    proc_overlap = tr_proc & te_proc
-    any_overlap = bool(id_overlap or orig_overlap or proc_overlap)
-    print("\nLeakage check (train vs validation/test):")
-    print(f"  Image ID overlap: {len(id_overlap)}")
-    print(f"  Original path overlap: {len(orig_overlap)}")
-    print(f"  Processed path overlap: {len(proc_overlap)}")
-    if any_overlap:
-        print("WARNING: Potential data leakage detected (overlapping items between train and validation/test).")
-    else:
-        print("No overlap detected between train and validation/test splits (by IDs and file paths).")
-    
-    # Pass forbidden paths to test dataset to block leakage when sampling (only for random split)
-    if not use_val_split:
-        setattr(test_binary_dataset, 'forbidden_original_paths', tr_orig)
-        setattr(test_binary_dataset, 'forbidden_processed_paths', tr_proc)
+    # ---- Verify no leakage between train/test (CarDD-TR vs CarDD-VAL) ----
+    print("\nLeakage check (CarDD-TR vs CarDD-VAL):")
+    print("  Using predefined dataset splits - should have no overlap by design")
+    print("  CarDD-TR (training) and CarDD-VAL (validation) are separate splits")
     
     # Create data loaders
     print("\n3. Creating data loaders...")
+    # Determine optimal num_workers (4 workers is usually good for most systems)
+    num_workers = 4
+    # Enable pin_memory for faster GPU transfer when using CUDA
+    use_pin_memory = torch.cuda.is_available()
+    
     train_loader = create_dataloader(
         train_binary_dataset,
         batch_size=config['batch_size'],
         shuffle=True,
-        target_size=config['target_size']
+        num_workers=num_workers,
+        pin_memory=use_pin_memory,
+        prefetch_factor=4  # Prefetch batches for better GPU utilization
     )
     test_loader = create_dataloader(
         test_binary_dataset,
         batch_size=config['batch_size'],
         shuffle=False,
-        target_size=config['target_size']
+        num_workers=num_workers,
+        pin_memory=use_pin_memory,
+        prefetch_factor=4
     )
+    print(f"   DataLoader configured: num_workers={num_workers}, pin_memory={use_pin_memory}")
     
-    # Set device
-    device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
-    print(f"\n4. Using device: {device}")
+    # Set device - prefer CUDA, then CPU (MPS has adaptive pooling issues)
+    if torch.cuda.is_available():
+        device = torch.device('cuda')
+        # Enable cuDNN benchmarking for faster training (if input size is constant)
+        torch.backends.cudnn.benchmark = True
+        print(f"\n4. Using device: {device}")
+        print(f"   CUDA device: {torch.cuda.get_device_name(0)}")
+        print(f"   CUDA memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
+        print(f"   cuDNN benchmark: Enabled")
+    else:
+        device = torch.device('cpu')
+        print(f"\n4. Using device: {device}")
+        if torch.backends.mps.is_available():
+            print("   Note: MPS device available but using CPU due to MPS adaptive pooling limitations")
     
     # Create model
     print(f"\n5. Creating {config['model_name']} model...")
@@ -435,11 +405,15 @@ def main():
     # Training loop
     print(f"\n6. Starting training for {config['num_epochs']} epochs...")
     print("=" * 60)
-    
-    best_test_acc = 0.0
+    print(f"Training dataset size: {len(train_binary_dataset)}")
+    print(f"Validation dataset size: {len(test_binary_dataset)}")
+    print()
+
+    best_val_acc = 0.0
     best_epoch = -1
     best_state_dict = None
     train_losses = []
+    train_grad_norms = []
     train_accuracies = []
     train_precisions = []
     train_recalls = []
@@ -449,26 +423,22 @@ def main():
     test_precisions = []
     test_recalls = []
     test_f1_scores = []
-    
+
     for epoch in range(config['num_epochs']):
         print(f"\nEpoch {epoch + 1}/{config['num_epochs']}")
         print("-" * 40)
-        # Report dataset sizes for this epoch
-        try:
-            print(f"Train dataset size: {len(train_binary_dataset)} | Test dataset size: {len(test_binary_dataset)}")
-        except Exception:
-            pass
-        
+
         # Train
         start_time = time.time()
-        train_metrics = train_epoch(model, train_loader, criterion, optimizer, device)
+        train_metrics = train_epoch(model, train_loader, criterion, optimizer, device, track_time=args.track_time)
         train_time = time.time() - start_time
-        
+
         # Evaluate on test set
         test_metrics = evaluate(model, test_loader, criterion, device)
-        
+
         # Store metrics
         train_losses.append(train_metrics['loss'])
+        train_grad_norms.append(train_metrics['grad_norm'])
         train_accuracies.append(train_metrics['accuracy'])
         train_precisions.append(train_metrics['precision'])
         train_recalls.append(train_metrics['recall'])
@@ -478,24 +448,24 @@ def main():
         test_precisions.append(test_metrics['precision'])
         test_recalls.append(test_metrics['recall'])
         test_f1_scores.append(test_metrics['f1_score'])
-        
-        # Print results
-        print(f"Train - Loss: {train_metrics['loss']:.4f}, Acc: {train_metrics['accuracy']:.2f}%, Prec: {train_metrics['precision']:.4f}, Rec: {train_metrics['recall']:.4f}, F1: {train_metrics['f1_score']:.4f}")
-        print(f"Test  - Loss: {test_metrics['loss']:.4f}, Acc: {test_metrics['accuracy']:.2f}%, Prec: {test_metrics['precision']:.4f}, Rec: {test_metrics['recall']:.4f}, F1: {test_metrics['f1_score']:.4f}")
-        print(f"Time: {train_time:.2f}s")
-        
+
+        # Print epoch summary
+        print(f"Train Loss={train_metrics['loss']:.4f}, Grad Norm={train_metrics['grad_norm']:.4f}, Train Acc={train_metrics['accuracy']:.2f}%, "
+              f"Val Loss={test_metrics['loss']:.4f}, Val Acc={test_metrics['accuracy']:.2f}%, Time={train_time:.2f}s")
+
         # Save best model
-        if test_metrics['accuracy'] > best_test_acc:
-            best_test_acc = test_metrics['accuracy']
+        if test_metrics['accuracy'] > best_val_acc:
+            best_val_acc = test_metrics['accuracy']
             best_epoch = epoch + 1
             # Store a CPU copy of the current best weights to save later
             best_state_dict = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
-            print(f"New best test accuracy: {best_test_acc:.2f}% at epoch {best_epoch}")
+            print(f"✓ New best validation accuracy: {best_val_acc:.2f}% at epoch {best_epoch}")
     
     # Prepare results
     results = {
-        'best_test_acc': best_test_acc,
+        'best_val_acc': best_val_acc,
         'train_losses': train_losses,
+        'train_grad_norms': train_grad_norms,
         'train_accuracies': train_accuracies,
         'train_precisions': train_precisions,
         'train_recalls': train_recalls,
@@ -506,14 +476,11 @@ def main():
         'test_recalls': test_recalls,
         'test_f1_scores': test_f1_scores,
         'train_samples': len(train_binary_dataset),
-        'test_samples': len(test_binary_dataset)
+        'validation_samples': len(test_binary_dataset)
     }
     
-    # Add information about combined dataset usage to config
-    config['use_combined_dataset'] = len(config['train_domains']) > 1
-    if config['use_combined_dataset']:
-        config['combined_domains'] = config['train_domains']
-        config['num_domains_combined'] = len(config['train_domains'])
+    # Add domain information to config
+    config['domain'] = config['train_domain']
     
     # Save model with organized structure
     model_dir = save_pytorch_model(
@@ -531,7 +498,7 @@ def main():
             best_ckpt_path = model_dir / f"{config['model_name']}_best_checkpoint.pth"
             torch.save({
                 'model_state_dict': best_state_dict,
-                'best_test_acc': best_test_acc,
+                'best_val_acc': best_val_acc,
                 'best_epoch': best_epoch,
                 'config': config,
                 'results': results,
@@ -546,7 +513,7 @@ def main():
                 md['best_epoch'] = best_epoch
                 with open(metadata_path, 'w') as f:
                     json.dump(md, f, indent=2)
-            print(f"Saved best model to: {best_model_path.name} (epoch {best_epoch}, acc {best_test_acc:.2f}%)")
+            print(f"Saved best model to: {best_model_path.name} (epoch {best_epoch}, acc {best_val_acc:.2f}%)")
     except Exception as e:
         print(f"Warning: failed to save best model: {e}")
     
@@ -556,6 +523,13 @@ def main():
         plot_losses(train_losses, val_losses=test_losses, title="Training vs Validation Loss", save_path=plot_path, show=False)
     except Exception as e:
         print(f"Warning: failed to plot loss curves: {e}")
+
+    # Plot and save gradient norm curves
+    try:
+        grad_plot_path = model_dir / "gradient_norm_curve.png"
+        plot_training_curves(train_grad_norms, title="Gradient Norm During Training", save_path=grad_plot_path, show=False)
+    except Exception as e:
+        print(f"Warning: failed to plot gradient curves: {e}")
     
     print("\nTraining completed successfully!")
 

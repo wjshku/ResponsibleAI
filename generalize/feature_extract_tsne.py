@@ -6,7 +6,8 @@ Extract pooled CNN/DANN features from cardd_data GenAI_Results and run t-SNE.
   - simple_detect_car (CNN baseline)
   - domain_adapt (DANN)
 
-- Uses the SAME eval preprocess as simple_detect_car.eval (get_eval_transforms)
+- Uses the NEW CARDD dataloaders from domain_adapt/cardd.py
+  (SD2Loader, KontextLoader with proper metadata handling)
 
 Outputs:
   - .npz file with features, labels, domains, image paths
@@ -47,9 +48,8 @@ if str(SIMPLE_DETECT_DIR) not in sys.path:
 if str(DOMAIN_ADAPT_DIR) not in sys.path:
     sys.path.insert(0, str(DOMAIN_ADAPT_DIR))
 
-from data_loader import CarScratchDataset, create_dataloader, get_eval_transforms  # type: ignore  # noqa: E402
 from models import CNNClassifier, get_model  # type: ignore  # noqa: E402
-from model_dann import get_dann_model  # type: ignore  # noqa: E402
+from cardd import CARDDModel, SD2Loader, KontextLoader  # type: ignore  # noqa: E402
 
 
 def find_latest_dir(base: Path, prefix: str) -> Optional[Path]:
@@ -312,7 +312,7 @@ def load_cnn_model(model_dir: Path, device: torch.device) -> Tuple[nn.Module, Tu
     return model, target_size, hidden_size, dropout, {"file": str(weight_path) if weight_path else None, "type": weight_type}
 
 
-def load_dann_model(model_dir: Path, device: torch.device) -> Tuple[nn.Module, dict]:
+def load_dann_model(model_dir: Path, device: torch.device, image_size: int = 224) -> Tuple[nn.Module, dict]:
     """Restore DANN model and return (model, weight_info)."""
     metadata_file = model_dir / "metadata.json"
     feature_hidden_size = 256
@@ -328,12 +328,9 @@ def load_dann_model(model_dir: Path, device: torch.device) -> Tuple[nn.Module, d
         except Exception:
             pass
 
-    model = get_dann_model(
-        input_channels=3,
-        num_classes=1,
-        feature_hidden_size=feature_hidden_size,
-        domain_hidden_size=domain_hidden_size,
-        dropout=dropout,
+    model = CARDDModel(
+        num_classes=2,
+        input_size=image_size
     )
 
     # Prefer best weights
@@ -480,12 +477,7 @@ def extract_features(
 
         if dann is not None:
             conv = dann.feature_extractor(images)
-            pooled = dann.feature_pooling(conv)  # (N, feature_dim)
-            # Pass through label_predictor first Linear to get feature_hidden_size
-            lp = dann.label_predictor
-            x = lp[0](pooled)  # Dropout
-            x = lp[1](x)       # Linear(feature_dim -> feature_hidden_size)
-            emb = x
+            emb = conv
             features_dann.append(emb.detach().cpu().numpy())
 
         labels.extend(y.detach().cpu().long().tolist())
@@ -585,22 +577,32 @@ def run_tsne_and_plot(
 
 
 def build_dataset_loader(data_root: Path, img2img: str, data_split: str, batch_size: int, target_size: Tuple[int, int], shuffle: bool, sample_size: Optional[int]) -> torch.utils.data.DataLoader:
-    data_dir = data_root / img2img / data_split
-    metadata_dir = data_dir / "metadata"
-    transform = get_eval_transforms(target_size=target_size)
-    dataset = CarScratchDataset.load_binary_dataset(
-        data_dir=str(data_dir),
-        metadata_dir=str(metadata_dir),
+    # Determine loader class based on domain
+    if img2img.lower() == 'sd2':
+        loader_class = SD2Loader
+    elif img2img.lower() == 'kontext':
+        loader_class = KontextLoader
+    else:
+        raise ValueError(f"Unsupported domain: {img2img}")
+
+    # Create loader instance with the data root
+    loader = loader_class(data_root=str(data_root))
+
+    # Get loaders (returns train_loader, test_loader)
+    train_loader, test_loader = loader.get_loaders(
+        batch_size=batch_size,
+        image_size=target_size[0],  # Assume square images
         sample_size=sample_size,
-        shuffle=shuffle,
-        transform=transform,
+        load_to_memory=False  # Don't preload for feature extraction (faster and uses less memory)
     )
-    return create_dataloader(dataset, batch_size=batch_size, shuffle=shuffle, target_size=target_size)
+
+    # Return appropriate loader based on split
+    return train_loader if data_split.endswith('-TR') else test_loader
 
 
 def main():
     parser = argparse.ArgumentParser(description="Extract CNN/DANN features (hidden sizes from metadata) and run t-SNE")
-    parser.add_argument("--genai_root", type=str, default=str(PROJECT_ROOT / "cardd_data/GenAI_Results"), help="Root of GenAI_Results")
+    parser.add_argument("--genai_root", type=str, default=str(PROJECT_ROOT / "cardd_data"), help="Root directory containing GenAI_Results")
     parser.add_argument("--img2img", type=str, nargs="+", default=["SD2", "Kontext"], help="List of generator domains to include")
     parser.add_argument("--split", type=str, default="CarDD-TR", help="Data split under each domain (e.g., CarDD-TR, CarDD-TE)")
     parser.add_argument("--batch_size", type=int, default=32)
@@ -700,7 +702,7 @@ def main():
         else:
             # Interactive selection
             if not args.non_interactive:
-                default_dann_base = PROJECT_ROOT / "domain_adapt" / "models"
+                default_dann_base = PROJECT_ROOT / "domain_adapt" / "models_cardd"
                 dann_base_input = input(f"\nDANN models base directory [{default_dann_base}]: ").strip()
                 dann_base = Path(dann_base_input) if dann_base_input else default_dann_base
                 dann_run_dir = _interactive_select_model_dir(
@@ -719,14 +721,22 @@ def main():
                 if dann_run_dir is None:
                     raise FileNotFoundError(f"No DANN weights found under: {default_dann_base}. Please specify --dann_dir or disable --non_interactive.")
 
-        # Read DANN metadata for feature_hidden_size
+        # Read DANN metadata for feature_hidden_size and image_size
         dann_meta_path = dann_run_dir / "metadata.json"
         dann_feature_hidden_size = 256
+        dann_image_size = 224  # Default image size for DANN model
         if dann_meta_path.exists():
             try:
                 dm = json.loads(dann_meta_path.read_text())
                 cfg = dm.get("config", {})
                 dann_feature_hidden_size = int(cfg.get("feature_hidden_size", dann_feature_hidden_size))
+                # Try to get image_size from DANN config
+                if cfg.get("image_size"):
+                    dann_image_size = int(cfg.get("image_size"))
+                elif cfg.get("target_size"):
+                    ts = cfg.get("target_size")
+                    if isinstance(ts, (list, tuple)) and len(ts) >= 1:
+                        dann_image_size = int(ts[0])
                 # If target_size not set from CNN, try to get from DANN
                 if not use_cnn and cfg.get("target_size"):
                     ts = cfg.get("target_size")
@@ -734,7 +744,7 @@ def main():
                         target_size = (int(ts[0]), int(ts[1]))
             except Exception:
                 pass
-        dann_model, dann_weight_info = load_dann_model(dann_run_dir, device)
+        dann_model, dann_weight_info = load_dann_model(dann_run_dir, device, image_size=dann_image_size)
         print(f"Loaded DANN model from: {dann_run_dir}")
     
     # Ensure we have a target_size even if neither model is used (shouldn't happen, but safety check)

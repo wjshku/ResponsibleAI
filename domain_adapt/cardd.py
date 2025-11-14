@@ -342,16 +342,12 @@ class CARDDModel(AbstractDANN):
         """
         feature_dim = self._get_feature_dim()
         domain_classifier = nn.Sequential()
-        domain_classifier.add_module('d_fc1', nn.Linear(feature_dim, 512))
-        domain_classifier.add_module('d_bn1', nn.BatchNorm1d(512))
-        domain_classifier.add_module('d_relu1', nn.ReLU(True))
-        domain_classifier.add_module('d_drop1', nn.Dropout(0.2))
-        domain_classifier.add_module('d_fc2', nn.Linear(512, 256))
-        domain_classifier.add_module('d_bn2', nn.BatchNorm1d(256))
-        domain_classifier.add_module('d_relu2', nn.ReLU(True))
-        domain_classifier.add_module('d_drop2', nn.Dropout(0.2))
-        domain_classifier.add_module('d_fc3', nn.Linear(256, 2))
-        domain_classifier.add_module('d_softmax', nn.LogSoftmax(dim=1))
+        domain_classifier.add_module('fc1', nn.Linear(feature_dim, 512))
+        domain_classifier.add_module('bn1', nn.BatchNorm1d(512))
+        domain_classifier.add_module('relu1', nn.ReLU(True))
+        domain_classifier.add_module('drop1', nn.Dropout(0.2))
+        domain_classifier.add_module('fc2', nn.Linear(512, 2))
+        domain_classifier.add_module('softmax', nn.LogSoftmax(dim=1))
         return domain_classifier
 
     def _get_feature_dim(self) -> int:

@@ -15,6 +15,15 @@ import cv2
 import numpy as np
 from PIL import Image
 
+# Optional matplotlib import for plotting
+try:
+    import matplotlib.pyplot as plt
+    MATPLOTLIB_AVAILABLE = True
+except ImportError:
+    MATPLOTLIB_AVAILABLE = False
+    plt = None
+    print("Warning: matplotlib not available. Plotting functions disabled.")
+
 # Optional PyTorch imports
 try:
     import torch
@@ -37,408 +46,340 @@ else:
 
 
 # -------------------- Transform utilities (torchvision) --------------------
-def get_default_transforms(target_size: Tuple[int, int] = (224, 224), augment: bool = True):
-    """Return a torchvision Compose for training/eval.
-
-    - When augment=True: include flips, rotation, color jitter.
-    - Always converts to tensor and normalizes to ImageNet stats.
-    """
-    if not TORCHVISION_AVAILABLE:
-        return None
-
+def get_preprocess_transforms(target_size: Tuple[int, int] = (224, 224)):
     train_transforms = [
         T.ToPILImage(),            # accept numpy array -> PIL
         T.Resize(target_size),
-    ]
-    if augment:
-        train_transforms.extend([
-            T.RandomHorizontalFlip(),
-            T.RandomRotation(15),
-            # Note: hue parameter removed due to overflow bug in some torchvision versions
-            T.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
-        ])
-    train_transforms.extend([
         T.ToTensor(),              # PIL -> tensor in [0,1]
         T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    ])
+    ]
     return T.Compose(train_transforms)
 
+def get_augment_transforms():
+    return T.Compose([
+        T.RandomHorizontalFlip(),
+        T.RandomRotation(15),
+        # Note: hue parameter removed due to overflow bug in some torchvision versions
+        T.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
+    ])
 
-def get_eval_transforms(target_size=(224, 224)):
-    return get_default_transforms(target_size=target_size, augment=False)
+def get_train_transforms(target_size: Tuple[int, int] = (224, 224)):
+    preprocess_transforms = get_preprocess_transforms(target_size)
+    augment_transforms = get_augment_transforms()
+    return preprocess_transforms, augment_transforms
 
+def get_eval_transforms(target_size: Tuple[int, int] = (224, 224)):
+    preprocess_transforms = get_preprocess_transforms(target_size)
+    return preprocess_transforms
 
-class CarScratchDataset:
+class CarDDDataset(Dataset):
     """
-    Dataset class for car scratch detection.
-    
-    This dataset loads original images, masks, and processed (fake) images
-    from the car scratch manipulation results.
+    Dataset class for loading CARDD images as binary classification samples.
+
+    Each image (both original and processed) is treated as a separate sample:
+    - Original images have label 0 (no damage)
+    - Processed images have label 1 (damaged)
+
+    Returns (image_path, label) tuples.
     """
     
     def __init__(self, 
-                 data_dir: str,
-                 metadata_dir: str,
+                 root: str = None,
+                 domain: str = 'sd2',
+                 train: bool = True,
+                 split: str = None,
+                 transform=None,
+                 augment_transform=None,
                  sample_size: Optional[int] = None,
                  random_seed: int = 42,
-                 transform=None,
-                 load_masks: bool = True,
-                 load_processed: bool = True):
+                 load_to_memory: bool = True):
         """
-        Initialize the dataset.
+        Initialize the CARDD dataset for binary classification.
         
         Args:
-            data_dir: Path to the directory containing processed images
-            metadata_dir: Path to the directory containing metadata JSON files
-            sample_size: If provided, load only this many random samples. If None, load all data.
-            random_seed: Random seed for reproducible sampling
+            root: Root directory containing GenAI_Results
+                  (default: '../cardd_data' locally, '~/ResponsibleAI/cardd_data' on EC2)
+            domain: Domain name ('sd2', 'kontext', or 'qwen')
+            train: Whether to load training or validation set (deprecated, use split instead)
+            split: Dataset split name ('TR', 'VAL', or 'TE'). If None, uses train parameter
             transform: Optional transform to be applied on images
-            load_masks: Whether to load mask images
-            load_processed: Whether to load processed (fake) images
+            augment_transform: Optional transform to be applied on images
+            sample_size: If provided, load only this many random samples
+            random_seed: Random seed for reproducible sampling
+            load_to_memory: If True, load all images into memory at initialization
         """
-        self.data_dir = Path(data_dir)
-        self.metadata_dir = Path(metadata_dir)
+        # Set default root based on environment
+        if root is None:
+            # Check if we're running on EC2
+            is_ec2 = (
+                os.path.exists('/home/ubuntu') or  # Ubuntu EC2 default
+                'ec2' in os.uname().nodename.lower() or  # hostname contains 'ec2'
+                os.path.exists('/opt/aws')  # AWS tools installed
+            )
+            root = '~/ResponsibleAI/cardd_data' if is_ec2 else '../cardd_data'
+            # Expand user path for EC2
+            if is_ec2 and root.startswith('~/'):
+                root = os.path.expanduser(root)
+
+        # Set domain and train parameters
+        self.domain = domain.lower()
+        self.train = train  # Keep for backward compatibility
         self.sample_size = sample_size
         self.random_seed = random_seed
         self.transform = transform
-        self.load_masks = load_masks
-        self.load_processed = load_processed
-        
-        # Load metadata
-        self.metadata = self._load_metadata()
+        self.augment_transform = augment_transform
+        self.load_to_memory = load_to_memory
+        self._images_in_memory = None  # Will store loaded images if load_to_memory=True
 
-        # Filter by success flag first (fast)
-        successful_entries = [
-            entry for entry in self.metadata
-            if entry.get('success', False)
-        ]
+        # Validate domain and map to correct folder name
+        domain_mapping = {
+            'sd2': 'SD2',
+            'kontext': 'Kontext',
+            'qwen': 'Qwen Image Edit'
+        }
+        if self.domain not in domain_mapping:
+            raise ValueError(f"Domain must be 'sd2', 'kontext', or 'qwen', got '{domain}'")
 
-        # Apply sampling BEFORE file existence checks to avoid checking thousands of files
-        if sample_size is not None and sample_size < len(successful_entries):
-            random.seed(random_seed)
-            # Sample first, then validate only the sampled entries
-            # Use min() to avoid sampling more than the population size
-            sample_candidates = min(len(successful_entries), sample_size * 2)
-            sampled_entries = random.sample(successful_entries, sample_candidates)  # Sample 2x to account for missing files
-            print(f"Sampled {len(sampled_entries)} candidates from {len(successful_entries)} successful entries")
+        # Set split name - support TR, VAL, or TE
+        if split is not None:
+            split_upper = split.upper()
+            if split_upper in ['TR', 'VAL', 'TE']:
+                split_name = f'CarDD-{split_upper}'
+            else:
+                raise ValueError(f"Split must be 'TR', 'VAL', or 'TE', got '{split}'")
         else:
-            sampled_entries = successful_entries
+            # Backward compatibility: use train parameter
+            split_name = 'CarDD-TR' if train else 'CarDD-VAL'
 
-        # Now check file existence only for sampled/selected entries (much faster!)
-        all_valid_entries = [
-            entry for entry in sampled_entries
-            if self._check_file_exists(entry)
-        ]
+        # Construct data and metadata directories
+        self.data_dir = os.path.join(root, 'GenAI_Results', domain_mapping[self.domain], split_name)
+        self.metadata_dir = os.path.join(self.data_dir, 'metadata')
 
-        # Take final sample_size if we got more than needed
-        if sample_size is not None and len(all_valid_entries) > sample_size:
-            random.seed(random_seed)
-            self.valid_entries = random.sample(all_valid_entries, sample_size)
-            print(f"Loaded {len(self.valid_entries)} valid entries from {len(sampled_entries)} candidates")
-        else:
-            self.valid_entries = all_valid_entries
-            print(f"Loaded {len(self.valid_entries)} valid entries")
-    
-    def _load_metadata(self) -> List[Dict]:
-        """Load all metadata from JSON files."""
-        metadata = []
-        
-        # Load processing batch metadata files
-        for json_file in self.metadata_dir.glob("processing_*.json"):
+        if not self._check_exists():
+            raise RuntimeError(f'Dataset not found. Please ensure CARDD data is available at {self.data_dir} with metadata in {self.metadata_dir}')
+
+        # Load samples from JSON files - each image becomes a separate sample
+        self.samples = []
+        import glob
+        json_pattern = os.path.join(self.metadata_dir, 'processing_*.json')
+        json_files = glob.glob(json_pattern)
+
+        print(f"Loading image paths from {len(json_files)} JSON files...")
+
+        for json_file in json_files:
             try:
                 with open(json_file, 'r') as f:
-                    data = json.load(f)
-                    metadata.append(data)
-            except Exception as e:
-                print(f"Warning: Could not load {json_file}: {e}")
-        
-        return metadata
-    
-    def _check_file_exists(self, entry: Dict) -> bool:
-        """Check if all required files exist for an entry."""
-        # Check original image
-        if not os.path.exists(entry['original_image_path']):
-            return False
-        
-        # Check mask if needed
-        if self.load_masks and not os.path.exists(entry['mask_path']):
-            return False
-        
-        # Check processed image if needed
-        if self.load_processed:
-            processed_path = entry['processed_image_path']
-            # Extract just the filename from the path
-            processed_filename = os.path.basename(processed_path)
-            # Use entry-specific data_dir if available (for combined datasets), otherwise use instance data_dir
-            entry_data_dir = Path(entry.get('_source_data_dir', self.data_dir))
-            processed_path = entry_data_dir / processed_filename
-            if not os.path.exists(processed_path):
-                return False
-        
-        return True
-    
-    def __len__(self) -> int:
-        return len(self.valid_entries)
-    
-    def __getitem__(self, idx: int) -> Dict[str, Union[np.ndarray, str, Dict]]:
-        """Get a single data item."""
-        entry = self.valid_entries[idx]
-        
-        # Load original image
-        original_img = self._load_image(entry['original_image_path'])
-        
-        result = {
-            'image_id': entry['image_id'],
-            'original_image': original_img,
-            'metadata': entry
-        }
-        
-        # Load mask if requested
-        if self.load_masks:
-            mask = self._load_image(entry['mask_path'], grayscale=True)
-            result['mask'] = mask
-        
-        # Load processed image if requested
-        if self.load_processed:
-            processed_path = entry['processed_image_path']
-            # Extract just the filename from the path
-            processed_filename = os.path.basename(processed_path)
-            # Use entry-specific data_dir if available (for combined datasets), otherwise use instance data_dir
-            entry_data_dir = Path(entry.get('_source_data_dir', self.data_dir))
-            processed_path = entry_data_dir / processed_filename
-            processed_img = self._load_image(str(processed_path))
-            result['processed_image'] = processed_img
-        
-        return result
-    
-    def _load_image(self, path: str, grayscale: bool = False) -> np.ndarray:
-        """Load an image from file path."""
-        try:
-            if grayscale:
-                img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
-            else:
-                img = cv2.imread(path, cv2.IMREAD_COLOR)
-                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            
-            if img is None:
-                raise ValueError(f"Could not load image: {path}")
-            
-            return img
-        except Exception as e:
-            print(f"Error loading image {path}: {e}")
-            # Return a dummy image if loading fails
-            if grayscale:
-                return np.zeros((100, 100), dtype=np.uint8)
-            else:
-                return np.zeros((100, 100, 3), dtype=np.uint8)
-    
-    @classmethod
-    def load_binary_dataset(cls, 
-                           data_dir: str, 
-                           metadata_dir: str, 
-                           sample_size: Optional[int] = None,
-                           shuffle: bool = True,
-                           random_seed: int = 42,
-                           transform=None,
-                           forbidden_original_paths: Optional[set] = None,
-                           forbidden_processed_paths: Optional[set] = None) -> 'CarScratchDataset':
-        """
-        Load dataset for binary classification (real vs processed).
-        
-        Each sample contains:
-        - x: image array (original or processed)
-        - y: label (0 for real/original, 1 for processed/fake)
-        
-        Args:
-            data_dir: Path to the directory containing processed images
-            metadata_dir: Path to the directory containing metadata JSON files
-            sample_size: If provided, load only this many random samples. If None, load all data.
-            shuffle: Whether to shuffle the data
-            random_seed: Random seed for reproducible sampling
-            transform: Optional transform to be applied on images
-            
-        Returns:
-            CarScratchDataset configured for binary classification
-        """
-        class BinaryClassificationDataset(cls):
-            def __init__(self, *args, **kwargs):
-                # Pop leakage-control kwargs before calling base __init__
-                f_orig = kwargs.pop('forbidden_original_paths', None)
-                f_proc = kwargs.pop('forbidden_processed_paths', None)
-                super().__init__(*args, **kwargs)
-                # Create shuffled indices for proper shuffling
-                if shuffle:
-                    random.seed(random_seed)
-                    self.shuffled_indices = list(range(len(self.valid_entries)))
-                    random.shuffle(self.shuffled_indices)
-                else:
-                    self.shuffled_indices = list(range(len(self.valid_entries)))
-                # Leakage control: forbid sampling of certain originals/processed
-                self.forbidden_original_paths = set(f_orig) if f_orig else set()
-                self.forbidden_processed_paths = set(f_proc) if f_proc else set()
-                # Cache to avoid repeated string lookups per index across epochs
-                self._forbid_cache = {}
-            
-            def __getitem__(self, idx: int) -> Tuple[np.ndarray, int]:
-                """Get a single data item for binary classification."""
-                # Use shuffled index if shuffling is enabled
-                actual_idx = self.shuffled_indices[idx]
-                
-                # Get the base data
-                base_data = super().__getitem__(actual_idx)
-                # Lazy-compute forbidden flags for this index once and cache
-                cached = self._forbid_cache.get(actual_idx)
-                if cached is None:
-                    entry_meta = base_data.get('metadata', {})
-                    orig_path_meta = str(entry_meta.get('original_image_path', ''))
-                    proc_path_meta = str(entry_meta.get('processed_image_path', ''))
-                    forbid_orig = bool(orig_path_meta and orig_path_meta in self.forbidden_original_paths)
-                    forbid_proc = bool(proc_path_meta and proc_path_meta in self.forbidden_processed_paths)
-                    cached = (forbid_orig, forbid_proc)
-                    self._forbid_cache[actual_idx] = cached
-                forbid_orig, forbid_proc = cached
-                
-                # Randomly choose between original (label 0) and processed (label 1)
-                want_original = random.random() < 0.5
-                image = None
-                label = None
-                # Enforce forbidden lists to avoid leakage between splits
-                if want_original and forbid_orig:
-                    want_original = False  # force processed
-                elif (not want_original) and forbid_proc:
-                    want_original = True  # force original
+                    metadata = json.load(f)
 
-                if want_original and 'original_image' in base_data:
-                    image = base_data['original_image']
-                    label = 0
-                else:
-                    # Fallback to processed if original unavailable or forbidden
-                    image = base_data.get('processed_image', base_data.get('original_image'))
-                    label = 1 if 'processed_image' in base_data else 0
-                
-                # Apply transforms if provided
-                if self.transform:
-                    image = self.transform(image)
-                
-                return image, label
+                # Only process successful entries
+                if not metadata.get('success', False):
+                    continue
+
+                # Get processed image path
+                processed_path = metadata.get('processed_image_path', '')
+                if processed_path:
+                    # Extract just the filename from the path
+                    processed_filename = os.path.basename(processed_path)
+                    # Build full path using data_dir
+                    full_processed_path = os.path.join(self.data_dir, processed_filename)
+
+                    # Get original image path from metadata
+                    original_path = metadata.get('original_image_path', '')
+
+                    # Add original image sample (label 0)
+                    if original_path:
+                        self.samples.append((original_path, 0))
+
+                    # Add processed image sample (label 1) if it exists
+                    if os.path.exists(full_processed_path):
+                        self.samples.append((full_processed_path, 1))
+
+            except (json.JSONDecodeError, KeyError) as e:
+                # Skip invalid JSON files
+                continue
+
+        # Apply sampling if requested
+        if sample_size is not None and len(self.samples) > sample_size:
+            random.seed(random_seed)
+            self.samples = random.sample(self.samples, sample_size)
+
+        print(f"Successfully loaded {len(self.samples)} CARDD samples (original: label 0, processed: label 1)")
         
-        return BinaryClassificationDataset(
-            data_dir=data_dir,
-            metadata_dir=metadata_dir,
-            sample_size=sample_size,
-            random_seed=random_seed,
-            transform=transform,
-            load_masks=False,  # Don't need masks for classification
-            load_processed=True,  # Need processed images for labels
-            forbidden_original_paths=forbidden_original_paths,
-            forbidden_processed_paths=forbidden_processed_paths
+        # Load all images to memory if requested
+        if self.load_to_memory:
+            print("Loading all images to memory (this may take a while)...")
+            self.__load_dataset_to_memory()
+            print("All images loaded to memory successfully.")
+
+    def _check_exists(self):
+        """Check if dataset files exist."""
+        import glob
+        return (os.path.exists(self.data_dir) and
+                os.path.exists(self.metadata_dir) and
+                len(glob.glob(os.path.join(self.metadata_dir, 'processing_*.json'))) > 0)
+
+    def _remap_path_for_ec2(self, image_path: str) -> str:
+        """
+        Remap image paths for EC2 environment.
+
+        The JSON metadata contains local paths, but on EC2 the data is synced
+        to different locations. This method detects EC2 and remaps paths accordingly.
+        """
+        # Check if we're running on EC2 (common EC2 indicators)
+        is_ec2 = (
+            os.path.exists('/home/ubuntu') or  # Ubuntu EC2 default
+            'ec2' in os.uname().nodename.lower() or  # hostname contains 'ec2'
+            os.path.exists('/opt/aws')  # AWS tools installed
         )
 
+        if not is_ec2:
+            return image_path  # Use original path for local development
 
-def combine_datasets(datasets: List, sample_size: Optional[int] = None, random_seed: int = 42) -> 'CarScratchDataset':
-    """
-    Combine multiple CarScratchDataset instances into a single dataset.
+        # On EC2, remap the paths
+        # Original local path: /Users/wjs/Local Storage/CarDD_release/CarDD_SOD/CarDD-TR/CarDD-TR-Image/filename.jpg
+        # Should become: /home/ubuntu/ResponsibleAI/CarDD_release/CarDD_SOD/CarDD-TR/CarDD-TR-Image/filename.jpg
+
+        # Also handle GenAI processed images that might reference original CarDD paths
+        if '/Users/wjs/Local Storage/CarDD_release/' in image_path:
+            # Replace with EC2 path
+            ec2_path = image_path.replace(
+                '/Users/wjs/Local Storage/CarDD_release/',
+                '/home/ubuntu/ResponsibleAI/CarDD_release/'
+            )
+            return ec2_path
+
+        # For GenAI processed images, they should already be in the correct location
+        # relative to the data_dir, but let's make sure
+        if image_path.startswith('/'):
+            # Absolute path - check if it exists, if not try relative to data_dir
+            if not os.path.exists(image_path):
+                # Try relative to data_dir
+                rel_path = os.path.relpath(image_path, '/')
+                candidate_path = os.path.join(self.data_dir, rel_path)
+                if os.path.exists(candidate_path):
+                    return candidate_path
+
+        return image_path  # Return original if no remapping needed
     
-    Args:
-        datasets: List of CarScratchDataset instances to combine
-        sample_size: If provided, sample this many entries from the combined dataset after combination.
-                     If None, use all entries from all datasets.
-        random_seed: Random seed for sampling if sample_size is provided
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __load_dataset_to_memory(self):
+        """Load all images into memory with transform applied."""
+        from tqdm import tqdm
         
-    Returns:
-        Combined CarScratchDataset instance
-    """
-    if not datasets:
-        raise ValueError("Cannot combine empty list of datasets")
-    
-    # Create a new dataset that concatenates all entries
-    combined = copy.copy(datasets[0])
-    combined.valid_entries = []
-    combined.shuffled_indices = []
-    
-    # Collect all valid entries from all datasets, preserving their data_dir
-    for ds in datasets:
-        for entry in ds.valid_entries:
-            # Store the original data_dir with each entry so we know where to find its files
-            entry_copy = entry.copy() if isinstance(entry, dict) else entry
-            if isinstance(entry_copy, dict):
-                entry_copy['_source_data_dir'] = str(ds.data_dir)
-            combined.valid_entries.append(entry_copy)
-    
-    # Sample from combined dataset if requested
-    total_before_sampling = len(combined.valid_entries)
-    if sample_size is not None and sample_size < len(combined.valid_entries):
-        random.seed(random_seed)
-        combined.valid_entries = random.sample(combined.valid_entries, sample_size)
-        print(f"Sampled {sample_size} entries from combined dataset of {total_before_sampling} total")
-    
-    # Create new shuffled indices for the combined dataset
-    combined.shuffled_indices = list(range(len(combined.valid_entries)))
-    if hasattr(datasets[0], 'shuffled_indices'):
-        # Re-shuffle if the original datasets had shuffling
-        random.seed(random_seed)
-        random.shuffle(combined.shuffled_indices)
-    
-    # Copy other attributes from the first dataset
-    combined.data_dir = datasets[0].data_dir
-    combined.metadata_dir = datasets[0].metadata_dir
-    combined.transform = datasets[0].transform
-    combined.load_masks = datasets[0].load_masks
-    combined.load_processed = datasets[0].load_processed
-    
-    # Preserve binary classification dataset attributes if they exist
-    if hasattr(datasets[0], 'forbidden_original_paths'):
-        # Combine forbidden paths from all datasets
-        all_forbidden_orig = set()
-        all_forbidden_proc = set()
-        for ds in datasets:
-            if hasattr(ds, 'forbidden_original_paths'):
-                all_forbidden_orig.update(ds.forbidden_original_paths)
-            if hasattr(ds, 'forbidden_processed_paths'):
-                all_forbidden_proc.update(ds.forbidden_processed_paths)
-        combined.forbidden_original_paths = all_forbidden_orig
-        combined.forbidden_processed_paths = all_forbidden_proc
-        # Clear cache as indices will be different
-        combined._forbid_cache = {}
-    
-    return combined
+        self._images_in_memory = []
+        
+        # Load all images
+        for idx in tqdm(range(len(self.samples)), desc="Loading images to memory"):
+            image_path, label = self.samples[idx]
+            #  Remap paths for EC2 environment
+            image_path = self._remap_path_for_ec2(image_path)
+            
+            # Load image
+            img = cv2.imread(image_path, cv2.IMREAD_COLOR)
+            if img is None:
+                raise ValueError(f"Could not load image: {image_path}")
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
+            # Apply transform if provided
+            if self.preprocess_transform is not None:
+                img = self.transform(img)
+            self._images_in_memory.append(img)
 
-def create_train_test_split(dataset, test_size=0.2, random_state=42):
-    """Create train/test split for binary classification dataset."""
-    import random
-    random.seed(random_state)
-    
-    # Get all valid indices
-    all_indices = list(range(len(dataset.valid_entries)))
-    random.shuffle(all_indices)
-    
-    # Split indices
-    split_idx = int(len(all_indices) * (1 - test_size))
-    train_indices = all_indices[:split_idx]
-    test_indices = all_indices[split_idx:]
-    
-    print(f"Train samples: {len(train_indices)}, Test samples: {len(test_indices)}")
-    
-    return train_indices, test_indices
+    def __getitem__(self, index):
+        """Get a single data item as (image, label)."""
+        image_path, label = self.samples[index]
+        # Load image from memory or disk
+        if self._images_in_memory is not None and index < len(self._images_in_memory):
+            # Load from memory
+            img = self._images_in_memory[index]
+        else:
+            # Load from disk
 
+            # Remap paths for EC2 environment
+            image_path = self._remap_path_for_ec2(image_path)
+            
+            # Load image
+            img = cv2.imread(image_path, cv2.IMREAD_COLOR)
+            if img is None:
+                raise ValueError(f"Could not load image: {image_path}")
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+            # Apply transform if provided
+            if self.transform is not None:
+                img = self.transform(img)
+        if self.augment_transform is not None:
+            img = self.augment_transform(img)
+
+        return img, label
+
+    def get_pair_image(self) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Efficiently get a random pair of original and processed images directly from metadata.
+
+        Args:
+            index: Ignored - always returns a random pair from metadata
+
+        Returns:
+            Tuple of (original_image, processed_image) as numpy arrays
+        """
+        import glob
+
+        # Get all JSON files from metadata directory
+        json_pattern = os.path.join(self.metadata_dir, 'processing_*.json')
+        json_files = glob.glob(json_pattern)
+
+        while True:
+            json_file = random.choice(json_files)
+            with open(json_file, 'r') as f:
+                metadata = json.load(f)
+            if metadata.get('success', False):
+                break
+
+        # Get paths directly from metadata (most efficient approach)
+        original_path = metadata.get('original_image_path', '')
+        processed_path = metadata.get('processed_image_path', '')
+
+        # Build full processed path
+        if processed_path:
+            processed_filename = os.path.basename(processed_path)
+            full_processed_path = os.path.join(self.data_dir, processed_filename)
+        else:
+            full_processed_path = ''
+
+        # Remap paths for EC2 environment
+        original_path = self._remap_path_for_ec2(original_path)
+        full_processed_path = self._remap_path_for_ec2(full_processed_path)
+
+        # Load images safely
+        original_img = cv2.imread(original_path, cv2.IMREAD_COLOR)
+        if original_img is None:
+            raise ValueError(f"Could not load image: {original_path}")
+        original_img = cv2.cvtColor(original_img, cv2.COLOR_BGR2RGB)
+        processed_img = cv2.imread(full_processed_path, cv2.IMREAD_COLOR)
+        if processed_img is None:
+            raise ValueError(f"Could not load image: {full_processed_path}")
+        processed_img = cv2.cvtColor(processed_img, cv2.COLOR_BGR2RGB)
+
+        return original_img, processed_img
 
 def create_dataloader(dataset,
                      batch_size: int = 8,
                      shuffle: bool = True,
                      num_workers: int = 0,
                      pin_memory: bool = True,
-                     target_size: Tuple[int, int] = (224, 224)):
+                     prefetch_factor: int = 2):
     """
     Create a PyTorch DataLoader for batch training.
 
     Args:
-        dataset: CarScratchDataset instance (regular or binary classification)
+        dataset: CarDDDataset instance (regular or binary classification)
         batch_size: Number of samples per batch
         shuffle: Whether to shuffle the data
         num_workers: Number of worker processes (0 for single-threaded)
         pin_memory: Whether to pin memory for faster GPU transfer
-        target_size: Target size for image resizing (height, width)
+        prefetch_factor: Number of batches to prefetch per worker
 
     Returns:
         PyTorch DataLoader
@@ -451,268 +392,108 @@ def create_dataloader(dataset,
     if pin_memory and torch.backends.mps.is_available():
         pin_memory = False
 
-    # Create a wrapper that resizes images to the same size
-    class ResizeWrapper:
-        def __init__(self, dataset, target_size):
-            self.dataset = dataset
-            self.target_size = target_size
-        
-        def __len__(self):
-            return len(self.dataset)
-        
-        def _to_numpy_hwc_uint8(self, img):
-            """Convert possible torch tensor to numpy HWC uint8 in [0,255]."""
-            try:
-                import torch as _torch
-            except Exception:
-                _torch = None
-            if _torch is not None and isinstance(img, _torch.Tensor):
-                # Accept (C,H,W) or (H,W,C)
-                if img.ndim == 3 and img.shape[0] in (1, 3):
-                    # (C,H,W) -> (H,W,C)
-                    img = img.permute(1, 2, 0)
-                # Detach and move to cpu
-                img = img.detach().cpu().numpy()
-                # If normalized (roughly [-2,2]) or [0,1], bring to [0,255]
-                # Heuristic: if max <= 1.5, assume [0,1]
-                maxv = float(np.nanmax(img)) if np.isfinite(img).all() else 1.0
-                minv = float(np.nanmin(img)) if np.isfinite(img).all() else 0.0
-                if maxv <= 1.5 and minv >= -0.5:
-                    img = (img * 255.0).clip(0, 255)
-                else:
-                    # If seemingly normalized by ImageNet stats, roughly shift to 0..1 not attempted
-                    # Just clip to [0,255] after scaling if needed
-                    pass
-                img = img.astype(np.uint8)
-            return img
-
-        def __getitem__(self, idx):
-            item = self.dataset[idx]
-
-            # If it's a binary classification dataset (returns tuple)
-            if isinstance(item, tuple):
-                # Handle 2-tuple (image, label) and 3-tuple (image, label, domain)
-                if len(item) == 2:
-                    image, label = item
-                    extra_values = ()
-                elif len(item) == 3:
-                    image, label, domain = item
-                    extra_values = (domain,)
-                else:
-                    raise ValueError(f"Unexpected tuple length: {len(item)}, expected 2 or 3")
-
-                # If tensor, keep as tensor and resize with torch (preserve normalization)
-                try:
-                    import torch as _torch
-                    import torch.nn.functional as _F
-                except Exception:
-                    _torch = None
-                if _torch is not None and isinstance(image, _torch.Tensor):
-                    # Expect (C,H,W); add batch dim and interpolate
-                    if image.ndim == 3 and image.shape[0] in (1, 3):
-                        image_b = image.unsqueeze(0)
-                        image_r = _F.interpolate(image_b, size=self.target_size, mode='bilinear', align_corners=False)
-                        image = image_r.squeeze(0)
-                    else:
-                        # Fallback to numpy path if unexpected shape
-                        img_np = self._to_numpy_hwc_uint8(image)
-                        image = cv2.resize(img_np, (self.target_size[1], self.target_size[0]))
-                else:
-                    img_np = self._to_numpy_hwc_uint8(image)
-                    image = cv2.resize(img_np, (self.target_size[1], self.target_size[0]))
-
-                # Return tuple with same length as input
-                if extra_values:
-                    return image, label, *extra_values
-                else:
-                    return image, label
-            else:
-                # If it's a regular dataset (returns dict)
-                result = item.copy()
-                try:
-                    import torch as _torch
-                    import torch.nn.functional as _F
-                except Exception:
-                    _torch = None
-                for k in ('original_image', 'processed_image', 'mask'):
-                    if k in result and result[k] is not None:
-                        v = result[k]
-                        if _torch is not None and isinstance(v, _torch.Tensor):
-                            if v.ndim == 3 and v.shape[0] in (1, 3):
-                                vb = v.unsqueeze(0)
-                                vr = _F.interpolate(vb, size=self.target_size, mode='bilinear', align_corners=False)
-                                result[k] = vr.squeeze(0)
-                            else:
-                                img_np = self._to_numpy_hwc_uint8(v)
-                                result[k] = cv2.resize(img_np, (self.target_size[1], self.target_size[0]))
-                        else:
-                            img_np = self._to_numpy_hwc_uint8(v)
-                            result[k] = cv2.resize(img_np, (self.target_size[1], self.target_size[0]))
-                return result
-    
-    # Wrap the dataset with resizing
-    resized_dataset = ResizeWrapper(dataset, target_size)
     
     return DataLoader(
-        resized_dataset,
+        dataset,
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
-        pin_memory=pin_memory
+        pin_memory=pin_memory,
+        prefetch_factor=prefetch_factor if num_workers > 0 else None
     )
-
-
-def get_dataset_info(metadata_dir: str) -> Dict:
-    """
-    Get information about the dataset.
-    
-    Args:
-        metadata_dir: Path to the metadata directory
-        
-    Returns:
-        Dictionary containing dataset statistics
-    """
-    metadata_dir = Path(metadata_dir)
-    metadata = []
-    for json_file in metadata_dir.glob("processing_*.json"):
-        try:
-            with open(json_file, 'r') as f:
-                data = json.load(f)
-                metadata.append(data)
-        except Exception as e:
-            print(f"Warning: Could not load {json_file}: {e}")
-    
-    # Calculate statistics
-    total_entries = len(metadata)
-    successful_entries = sum(1 for entry in metadata if entry.get('success', False))
-    
-    # Get image dimensions
-    dimensions = [entry.get('image_dimensions', [0, 0]) for entry in metadata if entry.get('success', False)]
-    widths = [d[0] for d in dimensions if len(d) >= 2]
-    heights = [d[1] for d in dimensions if len(d) >= 2]
-    
-    # Get mask areas
-    mask_areas = [entry.get('mask_area_pixels', 0) for entry in metadata if entry.get('success', False)]
-    
-    # Get prompts
-    prompts = [entry.get('tool_parameters', {}).get('prompt', '') for entry in metadata if entry.get('success', False)]
-    unique_prompts = list(set(prompts))
-    
-    return {
-        'total_entries': total_entries,
-        'successful_entries': successful_entries,
-        'success_rate': successful_entries / total_entries if total_entries > 0 else 0,
-        'image_dimensions': {
-            'widths': widths,
-            'heights': heights,
-            'avg_width': np.mean(widths) if widths else 0,
-            'avg_height': np.mean(heights) if heights else 0,
-            'min_width': min(widths) if widths else 0,
-            'max_width': max(widths) if widths else 0,
-            'min_height': min(heights) if heights else 0,
-            'max_height': max(heights) if heights else 0,
-        },
-        'mask_areas': {
-            'areas': mask_areas,
-            'avg_area': np.mean(mask_areas) if mask_areas else 0,
-            'min_area': min(mask_areas) if mask_areas else 0,
-            'max_area': max(mask_areas) if mask_areas else 0,
-        },
-        'unique_prompts': unique_prompts,
-        'num_unique_prompts': len(unique_prompts)
-    }
-
 
 # Example usage and testing
 if __name__ == "__main__":
-    # Set up paths
-    base_dir = "/Users/wjs/Library/CloudStorage/OneDrive-Personal/Coding, ML & DL/ResponsibleAI/cardd_data"
-    data_dir = f"{base_dir}/manipulated_results"
-    metadata_dir = f"{base_dir}/manipulated_results/metadata"
-
-    # Load full dataset
-    print("\nLoading full dataset...")
-    full_dataset = CarScratchDataset(
-        data_dir=data_dir,
-        metadata_dir=metadata_dir
-    )
-    print(f"Full dataset size: {len(full_dataset)}")
-    
-    # Test binary classification dataset
-    print("\nTesting binary classification dataset...")
-    binary_dataset = CarScratchDataset.load_binary_dataset(
-        data_dir=data_dir,
-        metadata_dir=metadata_dir,
-        sample_size=10,
-        shuffle=True,
-        random_seed=42
-    )
-    print(f"Binary dataset size: {len(binary_dataset)}")
-    
-    # Test a few samples
-    for i in range(min(3, len(binary_dataset))):
-        image, label = binary_dataset[i]
-        label_name = "REAL" if label == 0 else "FAKE"
-        print(f"Sample {i}: Image shape {image.shape}, Label: {label} ({label_name})")
-    
-    # Test DataLoader for batch training
-    print("\nTesting DataLoader for batch training...")
-    dataloader = create_dataloader(
-        binary_dataset, 
-        batch_size=2, 
-        shuffle=True
-    )
-    
-    if dataloader:
-        print(f"DataLoader created successfully")
-        print(f"Number of batches: {len(dataloader)}")
+    def plot_pair_demo(original_img: np.ndarray, processed_img: np.ndarray):
+        """
+            Demo function to plot a pair of original and processed images side by side.
         
-        # Test one batch
-        for batch_idx, (images, labels) in enumerate(dataloader):
-            print(f"Batch {batch_idx}:")
-            print(f"  Images shape: {images.shape}")
-            print(f"  Labels shape: {labels.shape}")
-            print(f"  Labels: {labels.tolist()}")
-            break  # Only show first batch
+        Args:
+            original_img: Original image as numpy array
+            processed_img: Processed image as numpy array
+        """
+        if not MATPLOTLIB_AVAILABLE:
+            print("Matplotlib not available - cannot plot images")
+            return
+
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+
+        # Plot original image
+        ax1.imshow(original_img)
+        ax1.set_title("Original Image\n(Label 0)", fontsize=14, fontweight='bold')
+        ax1.axis('off')
+
+        # Plot processed image
+        ax2.imshow(processed_img)
+        ax2.set_title("Processed Image\n(Label 1)", fontsize=14, fontweight='bold')
+        ax2.axis('off')
+
+        # Main title
+        plt.suptitle("Random Image Pair from CarDD Dataset",
+                    fontsize=16, fontweight='bold', y=0.98)
+
+        # Add some info text
+        fig.text(0.02, 0.02, "Dataset: CarDD (Car Damage Detection)\nMethod: get_pair_image() - Efficient random sampling from metadata",
+                fontsize=10, style='italic', bbox=dict(boxstyle="round,pad=0.3", facecolor="lightblue", alpha=0.5))
+
+        plt.tight_layout()
+        plt.show()
+
+    # Set up paths for CARDD dataset
+    base_dir = "/Users/wjs/Library/CloudStorage/OneDrive-Personal/Coding, ML & DL/ResponsibleAI/cardd_data"
+    data_dir = f"{base_dir}/GenAI_Results/SD2/CarDD-TR"
+    metadata_dir = f"{data_dir}/metadata"
+
+    print("=== CarDD Dataset and DataLoader Demo ===")
+
+    # 1. Create the CarDDDataset
+    print("\n1. Creating CarDDDataset...")
+    dataset = CarDDDataset(
+        domain='sd2',
+        train=True,
+        sample_size=10,  # Use small sample for demo
+        random_seed=2
+    )  # Uses default root='../cardd_data'
+
+    print(f"   Dataset size: {len(dataset)} samples")
+    print("   Each sample contains: (image, label)")
+    print("   - Label 0: Original image")
+    print("   - Label 1: Processed image")
+
+    # 2. Show sample data
+    print("\n2. Sample data inspection:")
+    for i in range(min(5, len(dataset))):
+        image_path, label = dataset.samples[i]
+        label_name = "Original" if label == 0 else "Processed"
+        print(f"   Sample {i}: {os.path.basename(image_path)} -> Label {label} ({label_name})")
+
+    # 3. Create DataLoader
+    print("\n3. Creating DataLoader...")
+    dataloader = create_dataloader(
+        dataset,
+        batch_size=4,
+        shuffle=False,  # Keep order for demo
+        num_workers=0
+    )
+
+    print(f"   DataLoader created with batch_size={dataloader.batch_size}")
+    print(f"   Number of batches: {len(dataloader)}")
+
+    # 5. Demonstrate get_pair_image method
+    print("\n5. Demonstrating get_pair_image method...")
+    if MATPLOTLIB_AVAILABLE:
+        try:
+            # Get a random pair of images
+            original_img, processed_img = dataset.get_pair_image()
+
+            print(f"   Successfully loaded image pair!")
+            print(f"   Original image shape: {original_img.shape}")
+            print(f"   Processed image shape: {processed_img.shape}")
+
+            # Plot the images
+            plot_pair_demo(original_img, processed_img)
+
+        except Exception as e:
+            print(f"   Error demonstrating image pair: {e}")
     else:
-        print("PyTorch not available, skipping DataLoader test")
-
-    # ------------------------------------------------------------------
-    # Demo: using get_default_transforms / get_eval_transforms
-    # ------------------------------------------------------------------
-    if TORCHVISION_AVAILABLE:
-        print("\nDemonstrating transforms usage...")
-        from pprint import pprint
-
-        # Training-time transforms with augmentation (applied to individual images)
-        train_transform = get_default_transforms(target_size=(224, 224), augment=True)
-        # Evaluation-time transforms (no augmentation)
-        eval_transform = get_eval_transforms(target_size=(224, 224))
-
-        # Build small datasets to visualize output types/shapes
-        train_demo_ds = CarScratchDataset.load_binary_dataset(
-            data_dir=data_dir,
-            metadata_dir=metadata_dir,
-            sample_size=2,
-            shuffle=True,
-            transform=train_transform,
-        )
-
-        eval_demo_ds = CarScratchDataset.load_binary_dataset(
-            data_dir=data_dir,
-            metadata_dir=metadata_dir,
-            sample_size=2,
-            shuffle=False,
-            transform=eval_transform,
-        )
-
-        from utils import visualize_transforms
-
-        print("\nTrain-time transforms (with augmentation):")
-        for i in range(min(2, len(train_demo_ds))):
-            image, label = train_demo_ds[i]
-            print(f"Image shape: {tuple(image.shape)}, Label: {label}")
-            visualize_transforms(image, f"Augmented training image {i}")
-
-    else:
-        print("\ntorchvision not available; skipping transforms demo.")
+        print("   Matplotlib not available - skipping pair plotting demo")

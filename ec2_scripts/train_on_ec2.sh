@@ -1,9 +1,10 @@
 #!/bin/bash
 # ============================================
-# Launch Training on EC2
+# Train Models on EC2
 # ============================================
-# This script starts ML training on EC2 (DANN, CNN, or scikit-learn models)
-# Supports multiple concurrent runs with unique timestamped session names
+# This script launches training jobs on EC2 for:
+# - Neural Network models (train_nn.py)
+# - Domain Adversarial Neural Networks (cardd.py)
 
 set -e
 
@@ -22,696 +23,260 @@ fi
 source "$CONFIG_FILE"
 
 echo "======================================================================"
-echo "LAUNCHING TRAINING ON EC2"
+echo "TRAINING ON EC2"
 echo "======================================================================"
 echo "Instance: $EC2_INSTANCE_ID"
 echo "IP: $EC2_PUBLIC_IP"
 echo ""
 
 # ============================================
-# Select training type
-# ============================================
-echo "Select training type:"
-echo "  [1] DANN - Domain Adversarial Neural Network (domain_adapt)"
-echo "  [2] MNIST DANN - MNIST/MNIST-M domain adaptation (domain_adapt)"
-echo "  [3] Simple Detect - CNN/MLP for binary classification (simple_detect_car)"
-echo "  [4] Simple Detect - Scikit-learn models (simple_detect_car)"
-echo ""
-read -p "Choose [1-4]: " -n 1 -r TRAINING_TYPE
-echo ""
-
-case $TRAINING_TYPE in
-    1)
-        TRAINING_DIR="domain_adapt"
-        TRAINING_SCRIPT="train_dann.py"
-        SESSION_NAME="dann_training_$(date +%Y%m%d_%H%M%S)"
-        ;;
-    2)
-        TRAINING_DIR="domain_adapt"
-        TRAINING_SCRIPT="mnist_dann.py"
-        SESSION_NAME="mnist_dann_training_$(date +%Y%m%d_%H%M%S)"
-        ;;
-    3)
-        TRAINING_DIR="simple_detect_car"
-        TRAINING_SCRIPT="train_nn.py"
-        SESSION_NAME="nn_training_$(date +%Y%m%d_%H%M%S)"
-        ;;
-    4)
-        TRAINING_DIR="simple_detect_car"
-        TRAINING_SCRIPT="train_sk.py"
-        SESSION_NAME="sk_training_$(date +%Y%m%d_%H%M%S)"
-        ;;
-    *)
-        echo "Invalid choice"
-        exit 1
-        ;;
-esac
-
-echo "Selected: $TRAINING_SCRIPT"
-echo ""
-
-# ============================================
-# Training configuration
-# ============================================
-if [ "$TRAINING_TYPE" == "1" ]; then
-    # DANN configuration
-    echo "Select DANN training configuration:"
-    echo "  [1] Quick test (sample_size=1000, epochs=10) - ~30 min"
-    echo "  [2] Medium (sample_size=3000, epochs=30) - ~2 hours"
-    echo "  [3] Full training (all data, epochs=50) - ~4-6 hours"
-    echo "  [4] Production (all data, epochs=100) - ~8-10 hours"
-    echo "  [5] Custom"
-    echo ""
-    read -p "Choose [1-5]: " -n 1 -r CONFIG_CHOICE
-    echo ""
-elif [ "$TRAINING_TYPE" == "2" ]; then
-    # MNIST DANN configuration
-    echo "Select MNIST DANN training configuration:"
-    echo "  [1] Quick test (epochs=5) - ~15 min"
-    echo "  [2] Medium (epochs=20) - ~1 hour"
-    echo "  [3] Full training (epochs=50) - ~2-3 hours"
-    echo "  [4] Production (epochs=100) - ~4-5 hours"
-    echo "  [5] Custom"
-    echo ""
-    read -p "Choose [1-5]: " -n 1 -r CONFIG_CHOICE
-    echo ""
-else
-    # Simple Detect configuration
-    echo "Select dataset configuration:"
-    echo "  [1] SD2 CarDD-TR (sample_size=500, epochs=10) - ~30 min"
-    echo "  [2] SD2 CarDD-TR (full dataset, epochs=20) - ~2 hours"
-    echo "  [3] Kontext CarDD-TR (sample_size=500, epochs=10) - ~30 min"
-    echo "  [4] Custom"
-    echo ""
-    read -p "Choose [1-4]: " -n 1 -r CONFIG_CHOICE
-    echo ""
-fi
-
-if [ "$TRAINING_TYPE" == "1" ]; then
-    # DANN configuration
-    case $CONFIG_CHOICE in
-        1)
-            SAMPLE_SIZE=1000
-            NUM_EPOCHS=10
-            BATCH_SIZE=32
-            LEARNING_RATE=0.001
-            FEATURE_HIDDEN_SIZE=256
-            DOMAIN_HIDDEN_SIZE=64
-            GAMMA=10.0
-            ZETA=1.0
-            ;;
-        2)
-            SAMPLE_SIZE=3000
-            NUM_EPOCHS=30
-            BATCH_SIZE=32
-            LEARNING_RATE=0.001
-            FEATURE_HIDDEN_SIZE=256
-            DOMAIN_HIDDEN_SIZE=64
-            GAMMA=10.0
-            ZETA=1.0
-            ;;
-        3)
-            SAMPLE_SIZE="None"
-            NUM_EPOCHS=50
-            BATCH_SIZE=32
-            LEARNING_RATE=0.001
-            FEATURE_HIDDEN_SIZE=256
-            DOMAIN_HIDDEN_SIZE=64
-            GAMMA=10.0
-            ZETA=1.0
-            ;;
-        4)
-            SAMPLE_SIZE="None"
-            NUM_EPOCHS=100
-            BATCH_SIZE=32
-            LEARNING_RATE=0.001
-            FEATURE_HIDDEN_SIZE=256
-            DOMAIN_HIDDEN_SIZE=64
-            GAMMA=10.0
-            ZETA=1.0
-            ;;
-        5)
-            read -p "Sample size (or 'None' for all): " SAMPLE_SIZE
-            read -p "Number of epochs: " NUM_EPOCHS
-            read -p "Batch size: " BATCH_SIZE
-            read -p "Learning rate (default 0.001): " LEARNING_RATE
-            read -p "Feature hidden size: " FEATURE_HIDDEN_SIZE
-            read -p "Domain hidden size (default 64): " DOMAIN_HIDDEN_SIZE
-            read -p "Gamma (lambda schedule sharpness, default 10.0): " GAMMA
-            read -p "Zeta (max adaptation strength 0-1, default 1.0): " ZETA
-            ;;
-        *)
-            echo "Invalid choice"
-            exit 1
-            ;;
-    esac
-
-    echo ""
-    echo "DANN Training configuration:"
-    echo "  Sample size: $SAMPLE_SIZE"
-    echo "  Epochs: $NUM_EPOCHS"
-    echo "  Batch size: $BATCH_SIZE"
-    echo "  Learning rate: $LEARNING_RATE"
-    echo "  Feature hidden size: $FEATURE_HIDDEN_SIZE"
-    echo "  Domain hidden size: $DOMAIN_HIDDEN_SIZE"
-    echo "  Gamma (lambda schedule): $GAMMA"
-    echo "  Zeta (max adaptation): $ZETA"
-    echo ""
-elif [ "$TRAINING_TYPE" == "2" ]; then
-    # MNIST DANN configuration
-    case $CONFIG_CHOICE in
-        1)
-            NUM_EPOCHS=5
-            BATCH_SIZE=128
-            LEARNING_RATE=0.001
-            ;;
-        2)
-            NUM_EPOCHS=20
-            BATCH_SIZE=128
-            LEARNING_RATE=0.001
-            ;;
-        3)
-            NUM_EPOCHS=50
-            BATCH_SIZE=128
-            LEARNING_RATE=0.001
-            ;;
-        4)
-            NUM_EPOCHS=100
-            BATCH_SIZE=128
-            LEARNING_RATE=0.001
-            ;;
-        5)
-            read -p "Number of epochs: " NUM_EPOCHS
-            read -p "Batch size (default 128): " BATCH_SIZE
-            BATCH_SIZE=${BATCH_SIZE:-128}
-            read -p "Learning rate (default 0.001): " LEARNING_RATE
-            LEARNING_RATE=${LEARNING_RATE:-0.001}
-            ;;
-        *)
-            echo "Invalid choice"
-            exit 1
-            ;;
-    esac
-
-    echo ""
-    echo "MNIST DANN Training configuration:"
-    echo "  Epochs: $NUM_EPOCHS"
-    echo "  Batch size: $BATCH_SIZE"
-    echo "  Learning rate: $LEARNING_RATE"
-    echo ""
-else
-    # Simple Detect configuration
-    case $CONFIG_CHOICE in
-        1)
-            IMG2IMG_TYPE="SD2"
-            DATA_TYPE="CarDD-TR"
-            SAMPLE_SIZE=500
-            NUM_EPOCHS=10
-            HIDDEN_SIZE=256
-            ;;
-        2)
-            IMG2IMG_TYPE="SD2"
-            DATA_TYPE="CarDD-TR"
-            SAMPLE_SIZE="None"
-            NUM_EPOCHS=20
-            HIDDEN_SIZE=256
-            ;;
-        3)
-            IMG2IMG_TYPE="Kontext"
-            DATA_TYPE="CarDD-TR"
-            SAMPLE_SIZE=500
-            NUM_EPOCHS=10
-            HIDDEN_SIZE=256
-            ;;
-        4)
-            read -p "Image type (SD2/Kontext): " IMG2IMG_TYPE
-            read -p "Data type (CarDD-TR/CarDD-TE/CarDD-VAL): " DATA_TYPE
-            read -p "Sample size (or 'None' for all): " SAMPLE_SIZE
-            read -p "Number of epochs: " NUM_EPOCHS
-            read -p "Hidden size: " HIDDEN_SIZE
-            ;;
-        *)
-            echo "Invalid choice"
-            exit 1
-            ;;
-    esac
-
-    echo ""
-    echo "Simple Detect Training configuration:"
-    echo "  Model: $TRAINING_SCRIPT"
-    echo "  Image type: $IMG2IMG_TYPE"
-    echo "  Dataset: $DATA_TYPE"
-    echo "  Sample size: $SAMPLE_SIZE"
-    echo "  Epochs: $NUM_EPOCHS"
-    echo "  Hidden size: $HIDDEN_SIZE"
-    echo ""
-fi
-
-# ============================================
 # Test connection
 # ============================================
 echo "Testing connection..."
-if ! ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -i "$EC2_KEY_PATH" "$EC2_SSH_USER@$EC2_PUBLIC_IP" "exit" 2>/dev/null; then
+if ! ssh -o ConnectTimeout=5 -i "$EC2_KEY_PATH" "$EC2_SSH_USER@$EC2_PUBLIC_IP" "exit" 2>/dev/null; then
     echo "❌ Cannot connect to EC2 instance"
+    echo "Make sure the instance is running:"
+    echo "  aws ec2 start-instances --region $EC2_REGION --instance-ids $EC2_INSTANCE_ID"
     exit 1
 fi
 echo "✓ Connection OK"
 echo ""
 
 # ============================================
-# Verify GPU
+# Select training type
 # ============================================
-echo "Verifying GPU..."
-GPU_INFO=$(ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -i "$EC2_KEY_PATH" "$EC2_SSH_USER@$EC2_PUBLIC_IP" "nvidia-smi --query-gpu=name --format=csv,noheader" 2>/dev/null || echo "No GPU")
-echo "✓ GPU: $GPU_INFO"
+echo "Select training type:"
+echo "  [1] Neural Network (train_nn.py) - Car damage detection"
+echo "  [2] Domain Adversarial NN (cardd.py) - SD2→Kontext adaptation"
+echo ""
+
+read -p "Choose [1-2]: " -n 1 -r TRAINING_TYPE
+echo ""
+
+case $TRAINING_TYPE in
+    1)
+        SCRIPT_NAME="train_nn.py"
+        SESSION_NAME="nn_training"
+        TRAINING_DIR="simple_detect_car"
+        SCRIPT_DESC="Neural Network Training"
+        ;;
+    2)
+        SCRIPT_NAME="cardd.py"
+        SESSION_NAME="dann_training"
+        TRAINING_DIR="domain_adapt"
+        SCRIPT_DESC="DANN Training"
+        ;;
+    *)
+        echo "❌ Invalid choice"
+        exit 1
+        ;;
+esac
+
+echo "✓ Selected: $SCRIPT_DESC ($SCRIPT_NAME)"
 echo ""
 
 # ============================================
-# Update training script with config
+# Configure training parameters
 # ============================================
-echo "Updating training configuration..."
+echo "======================================================================"
+echo "CONFIGURE $SCRIPT_DESC"
+echo "======================================================================"
 
-if [ "$TRAINING_TYPE" == "1" ]; then
-    # Update DANN script
-    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -i "$EC2_KEY_PATH" "$EC2_SSH_USER@$EC2_PUBLIC_IP" << EOF
-cd ~/ResponsibleAI/domain_adapt
+if [ "$TRAINING_TYPE" = "1" ]; then
+    # Neural Network training parameters
+    echo "Domain options:"
+    echo "  sd2    - Stable Diffusion 2 generated images"
+    echo "  kontext - Kontext generated images"
+    echo "  qwen   - Qwen generated images"
+    echo ""
+    read -p "Domain [sd2]: " DOMAIN
+    DOMAIN=${DOMAIN:-sd2}
 
-python3 << PYTHON_EOF
-import re
+    read -p "Sample size (leave empty for full dataset): " SAMPLE_SIZE
+    SAMPLE_SIZE=${SAMPLE_SIZE:-""}
 
-with open('train_dann.py', 'r') as f:
-    content = f.read()
+    read -p "Target size [224]: " TARGET_SIZE
+    TARGET_SIZE=${TARGET_SIZE:-224}
 
-# Update config
-content = re.sub(
-    r"'batch_size': \d+,",
-    "'batch_size': $BATCH_SIZE,",
-    content
-)
-content = re.sub(
-    r"'learning_rate': 1e-3,",
-    "'learning_rate': $LEARNING_RATE,",
-    content
-)
-content = re.sub(
-    r"'num_epochs': \d+,",
-    "'num_epochs': $NUM_EPOCHS,",
-    content
-)
-content = re.sub(
-    r"'sample_size': .*,  # Use None for full dataset",
-    "'sample_size': $SAMPLE_SIZE,  # Use None for full dataset",
-    content
-)
-content = re.sub(
-    r"'feature_hidden_size': \d+,",
-    "'feature_hidden_size': $FEATURE_HIDDEN_SIZE,",
-    content
-)
-content = re.sub(
-    r"'domain_hidden_size': \d+,",
-    "'domain_hidden_size': $DOMAIN_HIDDEN_SIZE,",
-    content
-)
-content = re.sub(
-    r"'gamma': [\d.]+,",
-    "'gamma': $GAMMA,",
-    content
-)
-content = re.sub(
-    r"'zeta': [\d.]+,",
-    "'zeta': $ZETA,",
-    content
-)
+    read -p "Batch size [32]: " BATCH_SIZE
+    BATCH_SIZE=${BATCH_SIZE:-32}
 
-with open('train_dann.py', 'w') as f:
-    f.write(content)
+    read -p "Learning rate [0.001]: " LEARNING_RATE
+    LEARNING_RATE=${LEARNING_RATE:-0.001}
 
-print("✓ DANN configuration updated")
-PYTHON_EOF
-EOF
-elif [ "$TRAINING_TYPE" == "2" ]; then
-    # Update MNIST DANN script - this script uses function parameters, not config dict
-    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -i "$EC2_KEY_PATH" "$EC2_SSH_USER@$EC2_PUBLIC_IP" << EOF
-cd ~/ResponsibleAI/domain_adapt
+    read -p "Epochs [20]: " EPOCHS
+    EPOCHS=${EPOCHS:-20}
 
-# Export variables for python script
-export BATCH_SIZE="$BATCH_SIZE"
-export NUM_EPOCHS="$NUM_EPOCHS"
-export LEARNING_RATE="$LEARNING_RATE"
+    echo "Model options:"
+    echo "  vanilla - MLP network"
+    echo "  cnn     - Convolutional Neural Network"
+    echo ""
+    read -p "Model [cnn]: " MODEL
+    MODEL=${MODEL:-cnn}
 
-python3 << PYTHON_EOF
-import re
-import os
+    read -p "Hidden size [256]: " HIDDEN_SIZE
+    HIDDEN_SIZE=${HIDDEN_SIZE:-256}
 
-with open('mnist_dann.py', 'r') as f:
-    content = f.read()
+    # Build command
+    CMD="cd ~/ResponsibleAI/$TRAINING_DIR && python $SCRIPT_NAME"
+    CMD="$CMD --domain $DOMAIN"
+    [ -n "$SAMPLE_SIZE" ] && CMD="$CMD --sample_size $SAMPLE_SIZE"
+    CMD="$CMD --target_size $TARGET_SIZE"
+    CMD="$CMD --batch_size $BATCH_SIZE"
+    CMD="$CMD --learning_rate $LEARNING_RATE"
+    CMD="$CMD --epochs $EPOCHS"
+    CMD="$CMD --model $MODEL"
+    CMD="$CMD --hidden_size $HIDDEN_SIZE"
 
-# Update train_dann function call parameters
-batch_size = os.environ['BATCH_SIZE']
-num_epochs = os.environ['NUM_EPOCHS']
-learning_rate = os.environ['LEARNING_RATE']
+elif [ "$TRAINING_TYPE" = "2" ]; then
+    # DANN training parameters
+    read -p "Number of epochs [5]: " EPOCHS
+    EPOCHS=${EPOCHS:-5}
 
-# Update the train_dann function call at the end of the file
-content = re.sub(
-    r'train_dann\(n_epoch=\d+, batch_size=\d+\)',
-    f'train_dann(n_epoch={num_epochs}, batch_size={batch_size}, lr={learning_rate})',
-    content
-)
+    read -p "Batch size [64]: " BATCH_SIZE
+    BATCH_SIZE=${BATCH_SIZE:-64}
 
-# Also update the default parameters in the function signature if needed
-content = re.sub(
-    r'batch_size=64, lr=1e-3',
-    f'batch_size={batch_size}, lr={learning_rate}',
-    content
-)
+    read -p "Learning rate [0.001]: " LEARNING_RATE
+    LEARNING_RATE=${LEARNING_RATE:-0.001}
 
-with open('mnist_dann.py', 'w') as f:
-    f.write(content)
+    read -p "Gamma (domain loss weight) [5.0]: " GAMMA
+    GAMMA=${GAMMA:-5.0}
 
-print("✓ MNIST DANN configuration updated")
-PYTHON_EOF
-EOF
+    read -p "Zeta (gradient reversal) [1.0]: " ZETA
+    ZETA=${ZETA:-1.0}
+
+    # Build command
+    CMD="cd ~/ResponsibleAI/$TRAINING_DIR && python $SCRIPT_NAME"
+    CMD="$CMD --n_epoch $EPOCHS"
+    CMD="$CMD --batch_size $BATCH_SIZE"
+    CMD="$CMD --lr $LEARNING_RATE"
+    CMD="$CMD --gamma $GAMMA"
+    CMD="$CMD --zeta $ZETA"
+fi
+
+echo ""
+echo "Training command:"
+echo "  $CMD"
+echo ""
+
+# ============================================
+# Check for existing training sessions (informational only)
+# ============================================
+echo "Checking for existing training sessions..."
+EXISTING_SESSIONS=$(ssh -T -i "$EC2_KEY_PATH" -o LogLevel=ERROR -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$EC2_SSH_USER@$EC2_PUBLIC_IP" \
+    "screen -list | grep -E '$SESSION_NAME' | head -5" 2>/dev/null || echo "")
+
+if [ -n "$EXISTING_SESSIONS" ]; then
+    echo "ℹ️  Existing $SCRIPT_DESC sessions found:"
+    echo "$EXISTING_SESSIONS" | sed 's/^/  /'
+    echo ""
+    echo "✓ Will start new session with unique timestamp: $UNIQUE_SESSION"
 else
-    # Update simple_detect_car script
-    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -i "$EC2_KEY_PATH" "$EC2_SSH_USER@$EC2_PUBLIC_IP" << EOF
-cd ~/ResponsibleAI/simple_detect_car
-
-python3 << 'PYTHON_EOF'
-import re
-
-with open('$TRAINING_SCRIPT', 'r') as f:
-    content = f.read()
-
-# Update img2img_type and data_type
-content = re.sub(
-    r'img2img_type, data_type = .*',
-    'img2img_type, data_type = "$IMG2IMG_TYPE", "$DATA_TYPE"',
-    content
-)
-
-# Update sample_size
-if "$SAMPLE_SIZE" == "None":
-    content = re.sub(
-        r"'sample_size': \d+,.*",
-        "'sample_size': None,  # Use full dataset",
-        content
-    )
-else:
-    content = re.sub(
-        r"'sample_size': \d+,.*",
-        "'sample_size': $SAMPLE_SIZE,  # Sample size",
-        content
-    )
-
-# Update num_epochs
-content = re.sub(
-    r"'num_epochs': \d+,",
-    "'num_epochs': $NUM_EPOCHS,",
-    content
-)
-
-# Update hidden_size
-content = re.sub(
-    r"'hidden_size': \d+,",
-    "'hidden_size': $HIDDEN_SIZE,",
-    content
-)
-
-with open('$TRAINING_SCRIPT', 'w') as f:
-    f.write(content)
-
-print("✓ $TRAINING_SCRIPT configuration updated")
-PYTHON_EOF
-EOF
+    echo "✓ No existing sessions found"
 fi
-
-echo "✓ Configuration updated"
 echo ""
 
 # ============================================
-# Install dependencies
+# Launch training in screen session
 # ============================================
 echo "======================================================================"
-echo "CHECKING DEPENDENCIES"
+echo "LAUNCHING TRAINING"
 echo "======================================================================"
 
-ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -i "$EC2_KEY_PATH" "$EC2_SSH_USER@$EC2_PUBLIC_IP" << 'EOF'
-# Check disk space
-echo "Checking disk space..."
-df -h / | tail -1
-AVAILABLE=$(df / --output=avail | tail -1 | tr -dc '0-9')
-if [ "$AVAILABLE" -lt "10000000" ]; then
-    echo "⚠️  Low disk space (less than 10GB available)"
-    echo "Cleaning up caches..."
+# Generate unique session name with timestamp
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+UNIQUE_SESSION="${SESSION_NAME}_${TIMESTAMP}"
 
-    # Clean apt cache
-    sudo apt-get clean
+echo "Starting training in screen session: $UNIQUE_SESSION"
+echo ""
 
-    # Clean pip/uv cache
-    rm -rf ~/.cache/pip
-    rm -rf ~/.cache/uv
-
-    # Clean old logs
-    sudo journalctl --vacuum-time=3d
-
-    echo "Disk space after cleanup:"
-    df -h / | tail -1
-fi
-
+# Setup virtual environment and launch training
+ssh -T -i "$EC2_KEY_PATH" -o LogLevel=ERROR -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$EC2_SSH_USER@$EC2_PUBLIC_IP" << EOF
 # Install uv if not available
 if ! command -v uv &> /dev/null; then
-    echo "Installing uv..."
+    echo "Installing uv package manager..."
     curl -LsSf https://astral.sh/uv/install.sh | sh
-    # Source the uv environment
-    if [ -f "$HOME/.local/bin/env" ]; then
-        source "$HOME/.local/bin/env"
-    fi
-    # Also try the cargo path
-    export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
 fi
 
-# Verify uv is available
-if ! command -v uv &> /dev/null; then
-    echo "❌ uv installation failed"
-    exit 1
-fi
+# Add uv to PATH for this session
+export PATH="\$HOME/.cargo/bin:\$PATH"
 
-echo "✓ uv available"
-
-# Create or activate virtual environment
-cd ~/ResponsibleAI
-if [ ! -d ".venv" ]; then
+# Check if virtual environment exists, create if needed
+if [ ! -d ~/ResponsibleAI/.venv ]; then
     echo "Creating virtual environment..."
-    uv venv .venv
+    cd ~/ResponsibleAI
+    uv venv
+    echo "Installing dependencies..."
+    uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+    uv pip install tqdm matplotlib scikit-learn pillow
 fi
+
+# Create screen session and run training
+screen -dmS $UNIQUE_SESSION bash --noprofile --norc -c "
+# Set up environment for this session
+export PATH=\\"\$HOME/.cargo/bin:\$PATH\\"
+
+echo '======================================================================' > ~/ResponsibleAI/$TRAINING_DIR/training_log_\${UNIQUE_SESSION}.txt
+echo '$SCRIPT_DESC - Started \$(date)' >> ~/ResponsibleAI/$TRAINING_DIR/training_log_\${UNIQUE_SESSION}.txt
+echo '======================================================================' >> ~/ResponsibleAI/$TRAINING_DIR/training_log_\${UNIQUE_SESSION}.txt
+echo '' >> ~/ResponsibleAI/$TRAINING_DIR/training_log_\${UNIQUE_SESSION}.txt
 
 # Activate virtual environment
-source .venv/bin/activate
-echo "✓ Virtual environment activated"
+source ~/ResponsibleAI/.venv/bin/activate
 
-# Check if PyTorch is installed
-if ! python -c "import torch" 2>/dev/null; then
-    echo "Installing PyTorch and dependencies..."
+# Run the training command with output to both screen and log file
+$CMD 2>&1 | tee -a ~/ResponsibleAI/$TRAINING_DIR/training_log_\${UNIQUE_SESSION}.txt
 
-    # Clean cache before installing large packages
-    uv cache clean 2>/dev/null || true
+echo '' >> ~/ResponsibleAI/$TRAINING_DIR/training_log_\${UNIQUE_SESSION}.txt
+echo '======================================================================' >> ~/ResponsibleAI/$TRAINING_DIR/training_log_\${UNIQUE_SESSION}.txt
+echo '$SCRIPT_DESC - Completed \$(date)' >> ~/ResponsibleAI/$TRAINING_DIR/training_log_\${UNIQUE_SESSION}.txt
+echo '======================================================================' >> ~/ResponsibleAI/$TRAINING_DIR/training_log_\${UNIQUE_SESSION}.txt
 
-    # Install PyTorch with CUDA support
-    echo "Installing PyTorch (this may take several minutes)..."
-    uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-
-    # Install other dependencies
-    echo "Installing other dependencies..."
-    uv pip install -r ec2_scripts/requirements.txt
-
-    echo "✓ Dependencies installed"
-else
-    echo "✓ PyTorch already installed"
-    # Still install/update other dependencies
-    uv pip install -r ec2_scripts/requirements.txt --quiet 2>/dev/null || true
-fi
-
-# Verify installation
-python3 << 'PYTHON'
-import torch
-print(f"PyTorch version: {torch.__version__}")
-print(f"CUDA available: {torch.cuda.is_available()}")
-if torch.cuda.is_available():
-    print(f"CUDA version: {torch.version.cuda}")
-    print(f"Device: {torch.cuda.get_device_name(0)}")
-PYTHON
+# Keep screen alive briefly so user can see completion
+sleep 3
+"
 EOF
 
+echo "✓ Training launched in screen session: $UNIQUE_SESSION"
 echo ""
 
 # ============================================
-# Start training
+# Verify training started
 # ============================================
-echo "======================================================================"
-echo "STARTING TRAINING"
-echo "======================================================================"
-echo ""
-echo "Training will run in a detached screen session"
-echo "You can close this terminal - training will continue"
-echo ""
-read -p "Start training? (y/n) " -n 1 -r
-echo
-if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-    echo "Aborted"
-    exit 0
-fi
-
-# Start training in screen session
-ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -i "$EC2_KEY_PATH" "$EC2_SSH_USER@$EC2_PUBLIC_IP" << EOFSCREEN
-cd ~/ResponsibleAI/$TRAINING_DIR
-
-# Install screen if not available
-if ! command -v screen &> /dev/null; then
-    echo "Installing screen..."
-    sudo apt-get update -qq
-    sudo apt-get install -y screen
-fi
-
-# Kill any existing training sessions with this name
-screen -X -S $SESSION_NAME quit 2>/dev/null || true
-
-# Start new screen session with robust error handling
-screen -dmS $SESSION_NAME bash -c "
-    exec > >(tee training_log_$SESSION_NAME.txt) 2>&1  # Redirect all output to log file
-
-    echo '========================================'
-    echo 'Training session: $SESSION_NAME'
-    echo 'Started: \$(date)'
-    echo '========================================'
-
-    cd ~/ResponsibleAI/$TRAINING_DIR || { echo 'ERROR: Failed to cd to $TRAINING_DIR'; exit 1; }
-
-    if [ -f ~/ResponsibleAI/.venv/bin/activate ]; then
-        source ~/ResponsibleAI/.venv/bin/activate || { echo 'ERROR: Failed to activate venv'; exit 1; }
-    else
-        echo 'ERROR: Virtual environment not found at ~/ResponsibleAI/.venv'
-        exit 1
-    fi
-
-    if [ ! -f $TRAINING_SCRIPT ]; then
-        echo 'ERROR: Training script not found: $TRAINING_SCRIPT'
-        ls -la
-        exit 1
-    fi
-
-    python3 -u $TRAINING_SCRIPT
-    EXIT_CODE=\$?
-    echo ''
-    echo '========================================'
-    echo 'Training completed with exit code: '\$EXIT_CODE
-    echo 'Finished: \$(date)'
-    echo '========================================'
-"
-
-# Wait a moment for screen to start
-sleep 2
-
-# Check if screen started
-if screen -list | grep -q $SESSION_NAME; then
-    echo "✓ Training started in screen session '$SESSION_NAME'"
-else
-    echo "❌ Failed to start screen session"
-    echo "Checking for errors..."
-    if [ -f training_log_$SESSION_NAME.txt ]; then
-        echo "Last 10 lines of training log:"
-        tail -10 training_log_$SESSION_NAME.txt
-    fi
-    exit 1
-fi
-EOFSCREEN
-
-echo ""
-
-# ============================================
-# Monitor initial output
-# ============================================
-echo "======================================================================"
-echo "INITIAL TRAINING OUTPUT"
-echo "======================================================================"
-echo "Waiting for training to start..."
+echo "Verifying training startup..."
 sleep 3
 
-ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -i "$EC2_KEY_PATH" "$EC2_SSH_USER@$EC2_PUBLIC_IP" << EOFMONITOR
-cd ~/ResponsibleAI/$TRAINING_DIR
+SESSION_CHECK=$(ssh -T -i "$EC2_KEY_PATH" -o LogLevel=ERROR -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$EC2_SSH_USER@$EC2_PUBLIC_IP" \
+    "screen -list | grep '$UNIQUE_SESSION'" 2>/dev/null || echo "")
 
-# Wait for log file to appear (up to 10 seconds)
-for i in {1..10}; do
-    if [ -f training_log_$SESSION_NAME.txt ]; then
-        echo "Log file found, showing initial output:"
-        echo "──────────────────────────────────────────────────────────────────"
-        head -50 training_log_$SESSION_NAME.txt
-        break
-    fi
-    echo "Waiting for log file... (\$i/10)"
-    sleep 1
-done
-
-if [ ! -f training_log_$SESSION_NAME.txt ]; then
-    echo "❌ Log file not created after 10 seconds"
-    echo "This usually means the screen session failed to start properly"
-    echo ""
-    echo "Checking screen sessions:"
-    screen -list
-    echo ""
-    echo "Checking directory contents:"
-    ls -la
+if [ -z "$SESSION_CHECK" ]; then
+    echo "❌ Failed to start training session"
+    exit 1
 fi
-EOFMONITOR
 
+echo "✓ Training session active: $UNIQUE_SESSION"
 echo ""
 
 # ============================================
-# Instructions
+# Show monitoring options
 # ============================================
 echo "======================================================================"
-echo "✅ TRAINING LAUNCHED"
+echo "TRAINING STARTED SUCCESSFULLY"
 echo "======================================================================"
+echo "Session: $UNIQUE_SESSION"
+echo "Log file: ~/ResponsibleAI/$TRAINING_DIR/training_log_${UNIQUE_SESSION}.txt"
 echo ""
-echo "Training Details:"
-echo "  Script: $TRAINING_SCRIPT"
-echo "  Session: $SESSION_NAME"
-echo "  Log file: training_log_$SESSION_NAME.txt"
+echo "Monitoring options:"
+echo "  1. Real-time monitoring:"
+echo "     ./ec2_scripts/monitor_training.sh"
 echo ""
-echo "Monitor training (SSH manually):"
-echo "  ssh -i \"$EC2_KEY_PATH\" \"$EC2_SSH_USER@$EC2_PUBLIC_IP\""
-echo "  cd ~/ResponsibleAI/$TRAINING_DIR"
-echo "  tail -f training_log_$SESSION_NAME.txt    # Follow log"
-echo "  screen -r $SESSION_NAME                    # Attach to session"
-echo "  watch -n 1 nvidia-smi                      # Monitor GPU"
+echo "  2. SSH and attach to session:"
+echo "     ssh -i '$EC2_KEY_PATH' $EC2_SSH_USER@$EC2_PUBLIC_IP"
+echo "     screen -r $UNIQUE_SESSION"
 echo ""
-echo "Download results when done:"
-echo "  ./ec2_scripts/download_results.sh"
+echo "  3. Check GPU usage:"
+echo "     ssh -i '$EC2_KEY_PATH' $EC2_SSH_USER@$EC2_PUBLIC_IP 'nvidia-smi'"
 echo ""
-if [ "$TRAINING_TYPE" == "1" ]; then
-    echo "Estimated completion:"
-    case $CONFIG_CHOICE in
-        1) echo "  ~30 minutes" ;;
-        2) echo "  ~2 hours" ;;
-        3) echo "  ~4-6 hours" ;;
-        4) echo "  ~8-10 hours" ;;
-    esac
-elif [ "$TRAINING_TYPE" == "2" ]; then
-    echo "Estimated completion:"
-    case $CONFIG_CHOICE in
-        1) echo "  ~15 minutes" ;;
-        2) echo "  ~1 hour" ;;
-        3) echo "  ~2-3 hours" ;;
-        4) echo "  ~4-5 hours" ;;
-    esac
-else
-    echo "Estimated completion:"
-    case $CONFIG_CHOICE in
-        1) echo "  ~30 minutes" ;;
-        2) echo "  ~2 hours" ;;
-        3) echo "  ~30 minutes" ;;
-    esac
-fi
-echo ""
-echo "⚠️  Don't forget to stop the instance when done!"
+echo "⚠️  Remember to download results when training completes!"
+echo "   ./ec2_scripts/download_results.sh"
 echo "======================================================================"
