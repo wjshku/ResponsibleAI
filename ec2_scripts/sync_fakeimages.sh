@@ -2,7 +2,7 @@
 # ============================================
 # Sync Fake Images Module
 # ============================================
-# Syncs SD2 and Kontext processed/fake images to EC2
+# Syncs SD2, Kontext, and Qwen processed/fake images to EC2
 
 sync_fakeimages() {
     echo "======================================================================"
@@ -42,10 +42,12 @@ sync_fakeimages() {
     # Count existing image files
     SD2_IMG_COUNT=$(ssh -T -i "$EC2_KEY_PATH" -o LogLevel=ERROR -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$EC2_SSH_USER@$EC2_PUBLIC_IP" "find ~/ResponsibleAI/cardd_data/GenAI_Results/SD2 -name '*.png' -o -name '*.jpg' | wc -l")
     KONTEXT_IMG_COUNT=$(ssh -T -i "$EC2_KEY_PATH" -o LogLevel=ERROR -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$EC2_SSH_USER@$EC2_PUBLIC_IP" "find ~/ResponsibleAI/cardd_data/GenAI_Results/Kontext -name '*.png' -o -name '*.jpg' | wc -l")
+    QWEN_IMG_COUNT=$(ssh -T -i "$EC2_KEY_PATH" -o LogLevel=ERROR -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$EC2_SSH_USER@$EC2_PUBLIC_IP" "find ~/ResponsibleAI/cardd_data/GenAI_Results/Qwen\ Image\ Edit -name '*.png' -o -name '*.jpg' | wc -l")
 
     echo "Current image files on EC2:"
     echo "  SD2: $SD2_IMG_COUNT files"
     echo "  Kontext: $KONTEXT_IMG_COUNT files"
+    echo "  Qwen Image Edit: $QWEN_IMG_COUNT files"
     echo ""
 
     # ============================================
@@ -53,7 +55,7 @@ sync_fakeimages() {
     # ============================================
     PROCESSED_SKIP=false
 
-    if [ "$SD2_IMG_COUNT" -gt "4000" ] && [ "$KONTEXT_IMG_COUNT" -gt "3500" ]; then
+    if [ "$SD2_IMG_COUNT" -gt "4000" ] && [ "$KONTEXT_IMG_COUNT" -gt "3500" ] && [ "$QWEN_IMG_COUNT" -gt "3000" ]; then
         echo "Images appear to be synced - skipping automatically"
         echo ""
         read -p "Force resync images anyway? (y/n) " -n 1 -r
@@ -68,6 +70,7 @@ sync_fakeimages() {
         echo "Images appear incomplete:"
         echo "  SD2: $SD2_IMG_COUNT (expected ~4,375)"
         echo "  Kontext: $KONTEXT_IMG_COUNT (expected ~4,000)"
+        echo "  Qwen Image Edit: $QWEN_IMG_COUNT (expected ~3,500)"
         echo ""
         read -p "Sync image files? (y/n) " -n 1 -r
         echo
@@ -85,9 +88,9 @@ sync_fakeimages() {
         echo "SYNCING IMAGE FILES"
         echo "======================================================================"
 
-        echo "⚠️  WARNING: This will upload ~8,375 image files"
-        echo "   Estimated time: 30-60 minutes depending on connection"
-        echo "   Estimated size: ~15-20 GB"
+        echo "⚠️  WARNING: This will upload ~12,000 image files"
+        echo "   Estimated time: 45-90 minutes depending on connection"
+        echo "   Estimated size: ~22-30 GB"
         echo ""
 
         read -p "Continue with image upload? (y/n) " -n 1 -r
@@ -121,9 +124,21 @@ sync_fakeimages() {
             "$EC2_SSH_USER@$EC2_PUBLIC_IP":~/ResponsibleAI/cardd_data/GenAI_Results/Kontext/
         echo "✓ Kontext images synced"
         echo ""
+
+        echo "Syncing Qwen images (~3,500 PNG files: 374 TE + 2,816 TR + 810 VAL)..."
+        rsync -avz --progress --stats --timeout=300 --compress --partial \
+            --include="*/" \
+            --include="*.png" \
+            --include="*.jpg" \
+            --exclude="*" \
+            -e "ssh -i \"$EC2_KEY_PATH\" -o ServerAliveInterval=60 -o ServerAliveCountMax=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR" \
+            'cardd_data/GenAI_Results/Qwen Image Edit/' \
+            "$EC2_SSH_USER@$EC2_PUBLIC_IP":~/ResponsibleAI/cardd_data/GenAI_Results/'Qwen Image Edit'/
+        echo "✓ Qwen images synced"
+        echo ""
     fi
 
     echo "🎉 Image Sync Complete!"
-    echo "Total expected: ~8,375 processed images"
+    echo "Total expected: ~11,875 processed images"
     echo ""
 }

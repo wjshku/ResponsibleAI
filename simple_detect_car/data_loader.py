@@ -367,13 +367,10 @@ class CarDDDataset(Dataset):
         original_path = metadata.get('original_image_path', '')
         processed_path = metadata.get('processed_image_path', '')
 
-        # Build full processed path - find the corresponding data directory
+        # Build full processed path
         if processed_path:
             processed_filename = os.path.basename(processed_path)
-            # Find which metadata directory this JSON came from
-            json_dir = os.path.dirname(json_file)
-            data_dir_idx = self.metadata_dirs.index(json_dir)
-            full_processed_path = os.path.join(self.data_dirs[data_dir_idx], processed_filename)
+            full_processed_path = os.path.join(self.data_dir, processed_filename)
         else:
             full_processed_path = ''
 

@@ -88,15 +88,27 @@ def main():
     print("\nSelect test domains:")
     print("  [1] SD2 only")
     print("  [2] Kontext only")
-    print("  [3] SD2 + Kontext (combined)")
-    test_domain_choice = input("Enter choice [1-3] (default: 1): ").strip() or "1"
-    
+    print("  [3] Qwen only")
+    print("  [4] SD2 + Kontext (combined)")
+    print("  [5] SD2 + Qwen (combined)")
+    print("  [6] Kontext + Qwen (combined)")
+    print("  [7] All domains (SD2 + Kontext + Qwen)")
+    test_domain_choice = input("Enter choice [1-7] (default: 1): ").strip() or "1"
+
     if test_domain_choice == "1":
         test_domains = ["SD2"]
     elif test_domain_choice == "2":
         test_domains = ["Kontext"]
     elif test_domain_choice == "3":
+        test_domains = ["Qwen Image Edit"]
+    elif test_domain_choice == "4":
         test_domains = ["SD2", "Kontext"]
+    elif test_domain_choice == "5":
+        test_domains = ["SD2", "Qwen Image Edit"]
+    elif test_domain_choice == "6":
+        test_domains = ["Kontext", "Qwen Image Edit"]
+    elif test_domain_choice == "7":
+        test_domains = ["SD2", "Kontext", "Qwen Image Edit"]
     else:
         print("Invalid choice, defaulting to SD2 only")
         test_domains = ["SD2"]
@@ -241,13 +253,20 @@ def main():
         'CarDD-TE': 'TE'
     }
     split_param = split_map.get(test_data_type, 'VAL')
-    
+
+    # Map display domain names to dataset domain names
+    domain_name_map = {
+        'SD2': 'sd2',
+        'Kontext': 'kontext',
+        'Qwen Image Edit': 'qwen'
+    }
+
     for domain in test_domains:
-        domain_lower = domain.lower()
+        dataset_domain = domain_name_map.get(domain, domain.lower())
         print(f"  Loading {domain} {test_data_type}...")
         try:
             ds = CarDDDataset(
-                domain=domain_lower,
+                domain=dataset_domain,
                 split=split_param,
                 transform=eval_transform,
                 sample_size=None,

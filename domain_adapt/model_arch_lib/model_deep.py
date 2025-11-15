@@ -1,3 +1,6 @@
+import torch.nn as nn
+from dann.model_dann import AbstractDANN
+
 # ============================================
 # DANN Model (CNN for CARDD)
 # ============================================

@@ -35,13 +35,11 @@ class TrainingTracker:
         Args:
             save_dir: Base directory for saving results (will create timestamped subfolder)
         """
-        # Create timestamped subfolder
+        # Create timestamped subfolder path but don't create directory yet
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.base_dir = Path(save_dir)
-        self.save_dir = self.base_dir / f"model_dann_{timestamp}"
-
-        # Create directories
-        self.save_dir.mkdir(exist_ok=True, parents=True)
+        self._save_dir_path = self.base_dir / f"model_dann_{timestamp}"
+        self._dir_created = False
 
         # Training metrics
         self.train_losses = {
@@ -91,6 +89,18 @@ class TrainingTracker:
         self.best_source_acc = 0.0
         self.best_target_acc = 0.0
         self.best_epoch = 0
+
+    @property
+    def save_dir(self):
+        """Get the save directory path, ensuring it exists."""
+        self._ensure_save_dir()
+        return self._save_dir_path
+
+    def _ensure_save_dir(self):
+        """Ensure the save directory exists, creating it if necessary."""
+        if not self._dir_created:
+            self._save_dir_path.mkdir(exist_ok=True, parents=True)
+            self._dir_created = True
 
     def update_epoch_metrics(self,
                            train_label_loss: float,
@@ -192,6 +202,8 @@ class TrainingTracker:
         Args:
             filename: Name of the metrics file
         """
+        self._ensure_save_dir()
+
         metrics = {
             'train_losses': self.train_losses,
             'train_accuracies': self.train_accuracies,
@@ -280,6 +292,7 @@ class TrainingTracker:
         plt.tight_layout()
 
         if save_path is None:
+            self._ensure_save_dir()
             save_path = self.save_dir / "loss_curves.png"
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
         plt.close()
@@ -332,6 +345,7 @@ class TrainingTracker:
         plt.tight_layout()
 
         if save_path is None:
+            self._ensure_save_dir()
             save_path = self.save_dir / "accuracy_curves.png"
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
         plt.close()
@@ -421,6 +435,7 @@ class TrainingTracker:
         plt.tight_layout()
 
         if save_path is None:
+            self._ensure_save_dir()
             save_path = self.save_dir / "gradient_analysis.png"
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
         plt.close()
@@ -467,6 +482,7 @@ class TrainingTracker:
 
         # Save the plot
         if save_path is None:
+            self._ensure_save_dir()
             save_path = self.save_dir / "test_adversarial_dynamics.png"
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
         plt.close()
@@ -577,6 +593,7 @@ def save_training_summary(tracker: TrainingTracker, model: nn.Module,
         }
     }
 
+    tracker._ensure_save_dir()
     filepath = tracker.save_dir / filename
     with open(filepath, 'w') as f:
         json.dump(summary, f, indent=2)

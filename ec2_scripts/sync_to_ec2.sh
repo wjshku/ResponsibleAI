@@ -114,10 +114,10 @@ echo ""
 read -p "Upload SD2 & Kontext metadata (JSON files + path fixes)? (y/n) " -n 1 -r
 echo
 if [[ $REPLY =~ ^[Yy]$ ]]; then
-    UPLOAD_SD2_KONTEXT_METADATA=true
+    UPLOAD_METADATA=true
     echo "✓ Will upload SD2 & Kontext metadata"
 else
-    UPLOAD_SD2_KONTEXT_METADATA=false
+    UPLOAD_METADATA=false
     echo "⏭️  Skipping SD2 & Kontext metadata upload"
 fi
 echo ""
@@ -175,26 +175,30 @@ echo ""
 # ============================================
 
 # Check existing data status if any uploads are enabled
-if [ "$UPLOAD_CARDD" = "true" ] || [ "$UPLOAD_SD2_KONTEXT" = "true" ] || [ "$UPLOAD_MNIST_M" = "true" ]; then
+if [ "$UPLOAD_CARDD" = "true" ] || [ "$UPLOAD_METADATA" = "true" ] || [ "$UPLOAD_SD2_KONTEXT_IMAGES" = "true" ] || [ "$UPLOAD_MNIST_M" = "true" ]; then
     echo "Checking existing data on EC2..."
-    DATA_STATUS=$(ssh -T -i "$EC2_KEY_PATH" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o PasswordAuthentication=no -o ConnectTimeout=10 "$EC2_SSH_USER@$EC2_PUBLIC_IP" "
-    ORIG_IMGS=\$(find ~/ResponsibleAI/CarDD_release/CarDD_SOD -type f \\\( -name '*.jpg' -o -name '*.png' \\\) -path '*/Image/*' 2>/dev/null | wc -l)
-    MASKS=\$(find ~/ResponsibleAI/CarDD_release/CarDD_SOD -type f -path '*/Mask/*' 2>/dev/null | wc -l)
-    SD2_JSON=\$(find ~/ResponsibleAI/cardd_data/GenAI_Results/SD2 -name '*.json' 2>/dev/null | wc -l)
-    SD2_IMG=\$(find ~/ResponsibleAI/cardd_data/GenAI_Results/SD2 \\\( -name '*.png' -o -name '*.jpg' \\\) 2>/dev/null | wc -l)
-    KONTEXT_JSON=\$(find ~/ResponsibleAI/cardd_data/GenAI_Results/Kontext -name '*.json' 2>/dev/null | wc -l)
-    KONTEXT_IMG=\$(find ~/ResponsibleAI/cardd_data/GenAI_Results/Kontext \\\( -name '*.png' -o -name '*.jpg' \\\) 2>/dev/null | wc -l)
-    MNIST_M_FILES=\$(find ~/ResponsibleAI/domain_adapt/data/mnist_m -name '*.png' 2>/dev/null | wc -l)
-    echo \"\$ORIG_IMGS \$MASKS \$SD2_JSON \$SD2_IMG \$KONTEXT_JSON \$KONTEXT_IMG \$MNIST_M_FILES\"
-    " 2>/dev/null)
+    # Check data status on EC2 using a simple inline script
+    DATA_STATUS=$(ssh -T -i "$EC2_KEY_PATH" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o PasswordAuthentication=no -o ConnectTimeout=10 "$EC2_SSH_USER@$EC2_PUBLIC_IP" '
+    ORIG_IMGS=$(find ~/ResponsibleAI/CarDD_release/CarDD_SOD -type f \( -name "*.jpg" -o -name "*.png" \) -path "*/Image/*" 2>/dev/null | wc -l)
+    MASKS=$(find ~/ResponsibleAI/CarDD_release/CarDD_SOD -type f -path "*/Mask/*" 2>/dev/null | wc -l)
+    SD2_JSON=$(find ~/ResponsibleAI/cardd_data/GenAI_Results/SD2 -name "*.json" 2>/dev/null | wc -l)
+    SD2_IMG=$(find ~/ResponsibleAI/cardd_data/GenAI_Results/SD2 \( -name "*.png" -o -name "*.jpg" \) 2>/dev/null | wc -l)
+    KONTEXT_JSON=$(find ~/ResponsibleAI/cardd_data/GenAI_Results/Kontext -name "*.json" 2>/dev/null | wc -l)
+    KONTEXT_IMG=$(find ~/ResponsibleAI/cardd_data/GenAI_Results/Kontext \( -name "*.png" -o -name "*.jpg" \) 2>/dev/null | wc -l)
+    QWEN_JSON=$(find ~/ResponsibleAI/cardd_data/GenAI_Results/"Qwen Image Edit" -name "*.json" 2>/dev/null | wc -l)
+    QWEN_IMG=$(find ~/ResponsibleAI/cardd_data/GenAI_Results/"Qwen Image Edit" \( -name "*.png" -o -name "*.jpg" \) 2>/dev/null | wc -l)
+    MNIST_M_FILES=$(find ~/ResponsibleAI/domain_adapt/data/mnist_m -name "*.png" 2>/dev/null | wc -l)
+    echo "$ORIG_IMGS $MASKS $SD2_JSON $SD2_IMG $KONTEXT_JSON $KONTEXT_IMG $QWEN_JSON $QWEN_IMG $MNIST_M_FILES"
+    ' 2>/dev/null)
 
-    read -r ORIG_COUNT MASK_COUNT SD2_JSON_COUNT SD2_IMG_COUNT KONTEXT_JSON_COUNT KONTEXT_IMG_COUNT MNIST_M_COUNT <<< "$DATA_STATUS"
+    read -r ORIG_COUNT MASK_COUNT SD2_JSON_COUNT SD2_IMG_COUNT KONTEXT_JSON_COUNT KONTEXT_IMG_COUNT QWEN_JSON_COUNT QWEN_IMG_COUNT MNIST_M_COUNT <<< "$DATA_STATUS"
 
     echo "Current data on EC2:"
     echo "  CarDD images: $ORIG_COUNT (expected: 4,010 from TE+TR+VAL)"
     echo "  CarDD masks: $MASK_COUNT (expected: 4,010)"
     echo "  SD2 metadata: $SD2_JSON_COUNT, images: $SD2_IMG_COUNT (expected: ~4,375)"
     echo "  Kontext metadata: $KONTEXT_JSON_COUNT, images: $KONTEXT_IMG_COUNT (expected: ~4,000)"
+    echo "  Qwen metadata: $QWEN_JSON_COUNT, images: $QWEN_IMG_COUNT (expected: ~3,500)"
     echo "  MNIST-M files: $MNIST_M_COUNT (expected: ~60,000)"
     echo ""
 fi
@@ -212,7 +216,7 @@ fi
 # ============================================
 # PART 2 EXECUTION: SD2 & Kontext Metadata
 # ============================================
-if [ "$UPLOAD_SD2_KONTEXT_METADATA" = "true" ]; then
+if [ "$UPLOAD_METADATA" = "true" ]; then
     sync_metadata
 else
     echo "⏭️  SD2 & Kontext metadata upload skipped"

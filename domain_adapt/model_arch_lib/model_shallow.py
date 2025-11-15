@@ -1,3 +1,6 @@
+import torch.nn as nn
+from dann.model_dann import AbstractDANN
+
 class CARDDModel(AbstractDANN):
     """
     CNN Model for DANN with SD2/Kontext adaptation.

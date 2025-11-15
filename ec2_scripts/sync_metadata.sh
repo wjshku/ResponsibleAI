@@ -2,7 +2,7 @@
 # ============================================
 # Sync Metadata Module
 # ============================================
-# Syncs SD2 and Kontext metadata files to EC2 and fixes paths
+# Syncs SD2, Kontext, and Qwen metadata files to EC2 and fixes paths
 
 sync_metadata() {
     echo "======================================================================"
@@ -42,19 +42,21 @@ sync_metadata() {
     # Count existing metadata files
     SD2_JSON_COUNT=$(ssh -T -i "$EC2_KEY_PATH" -o LogLevel=ERROR -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$EC2_SSH_USER@$EC2_PUBLIC_IP" "find ~/ResponsibleAI/cardd_data/GenAI_Results/SD2 -name 'processing_*.json' -type f 2>/dev/null | wc -l")
     KONTEXT_JSON_COUNT=$(ssh -T -i "$EC2_KEY_PATH" -o LogLevel=ERROR -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$EC2_SSH_USER@$EC2_PUBLIC_IP" "find ~/ResponsibleAI/cardd_data/GenAI_Results/Kontext -name 'processing_*.json' -type f 2>/dev/null | wc -l")
+    QWEN_JSON_COUNT=$(ssh -T -i "$EC2_KEY_PATH" -o LogLevel=ERROR -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$EC2_SSH_USER@$EC2_PUBLIC_IP" "find ~/ResponsibleAI/cardd_data/GenAI_Results/Qwen\ Image\ Edit -name 'processing_*.json' -type f 2>/dev/null | wc -l")
 
     echo "Current metadata files on EC2:"
     echo "  SD2: $SD2_JSON_COUNT files"
     echo "  Kontext: $KONTEXT_JSON_COUNT files"
+    echo "  Qwen Image Edit: $QWEN_JSON_COUNT files"
     echo ""
 
     # ============================================
     # Determine if sync is needed
     # ============================================
     METADATA_SKIP=false
-    UPLOAD_SD2_KONTEXT=false
+    UPLOAD_METADATA=false
 
-    if [ "$SD2_JSON_COUNT" -gt "4000" ] && [ "$KONTEXT_JSON_COUNT" -gt "3500" ]; then
+    if [ "$SD2_JSON_COUNT" -gt "4000" ] && [ "$KONTEXT_JSON_COUNT" -gt "3500" ] && [ "$QWEN_JSON_COUNT" -gt "3000" ]; then
         echo "Metadata appears to be synced - skipping automatically"
         echo ""
         read -p "Force resync metadata anyway? (y/n) " -n 1 -r
@@ -62,7 +64,7 @@ sync_metadata() {
         if [[ $REPLY =~ ^[Yy]$ ]]; then
             echo "✓ Will force resync metadata"
             METADATA_SKIP=false
-            UPLOAD_SD2_KONTEXT=true
+            UPLOAD_METADATA=true
         else
             METADATA_SKIP=true
         fi
@@ -70,11 +72,12 @@ sync_metadata() {
         echo "Metadata appears incomplete:"
         echo "  SD2: $SD2_JSON_COUNT files (expected ~4,383)"
         echo "  Kontext: $KONTEXT_JSON_COUNT files (expected ~4,003)"
+        echo "  Qwen Image Edit: $QWEN_JSON_COUNT files (expected ~3,500)"
         echo ""
         read -p "Sync metadata files? (y/n) " -n 1 -r
         echo
         if [[ $REPLY =~ ^[Yy]$ ]]; then
-            UPLOAD_SD2_KONTEXT=true
+            UPLOAD_METADATA=true
         else
             echo "Skipping metadata sync"
             METADATA_SKIP=true
@@ -111,13 +114,24 @@ sync_metadata() {
         echo "✓ Kontext metadata synced"
         echo ""
 
+        echo "Syncing Qwen metadata (~3,500 JSON files: 375 TE + 2,817 TR + 811 VAL)..."
+        rsync -avz --progress --stats \
+            --include="*/" \
+            --include="*.json" \
+            --exclude="*" \
+            -e "ssh -i \"$EC2_KEY_PATH\" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR" \
+            'cardd_data/GenAI_Results/Qwen Image Edit/' \
+            "$EC2_SSH_USER@$EC2_PUBLIC_IP":~/ResponsibleAI/cardd_data/GenAI_Results/'Qwen Image Edit'/
+        echo "✓ Qwen metadata synced"
+        echo ""
+
         UPLOAD_SD2_KONTEXT=true
     fi
 
     # ============================================
     # Fix metadata paths
     # ============================================
-    if [ "$UPLOAD_SD2_KONTEXT" = "true" ] && [ "$METADATA_SKIP" != "true" ]; then
+    if [ "$UPLOAD_METADATA" = "true" ] && [ "$METADATA_SKIP" != "true" ]; then
         echo "======================================================================"
         echo "FIXING METADATA PATHS"
         echo "======================================================================"

@@ -84,6 +84,7 @@ sync_code() {
         --exclude='*.joblib' \
         --exclude='__pycache__' \
         --exclude='.git' \
+        --exclude='.venv' \
         --exclude='models/' \
         --exclude='models_minst/' \
         --exclude='models_mnist/' \
@@ -92,7 +93,7 @@ sync_code() {
         --exclude='**/models_minst/' \
         --exclude='**/models_mnist/' \
         -e "ssh -i \"$EC2_KEY_PATH\" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR" \
-        simple_detect_car/*.py \
+        simple_detect_car/ \
         "$EC2_SSH_USER@$EC2_PUBLIC_IP":~/ResponsibleAI/simple_detect_car/
 
     echo "✓ Dependencies synced"

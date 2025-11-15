@@ -14,7 +14,6 @@ The model learns to:
 
 import json
 import torch
-import torch.nn as nn
 from pathlib import Path
 from torch.utils.data import Dataset
 import torchvision.transforms as transforms
@@ -28,13 +27,13 @@ import argparse
 
 from dann.train_dann import *
 from dann.loader_dann import AbstractDANNDataset, AbstractDANNLoader, create_loader_function
-from dann.model_dann import AbstractDANN
+from model_arch_lib.model_deep import CARDDModel
 
 # Domain name mapping for folder paths
 DOMAIN_FOLDER_MAP = {
     'sd2': 'SD2',
     'kontext': 'Kontext',
-    'qwen': 'Qwen'
+    'qwen': 'Qwen Image Edit'
 }
 
 
@@ -73,8 +72,8 @@ class CARDDDataset(AbstractDANNDataset):
         self.load_to_memory = load_to_memory
         self._images_in_memory = None  # Will store loaded images if load_to_memory=True
 
-        if self.domain not in ['sd2', 'kontext']:
-            raise ValueError(f"Domain must be 'sd2' or 'kontext', got '{domain}'")
+        if self.domain not in ['sd2', 'kontext', 'qwen']:
+            raise ValueError(f"Domain must be 'sd2', 'kontext', or 'qwen', got '{domain}'")
 
         # Set split name
         split = 'CarDD-TR' if train else 'CarDD-VAL'
@@ -252,116 +251,6 @@ class CARDDDataset(AbstractDANNDataset):
         """Return dataset size."""
         return len(self.samples)
 
-
-# ============================================
-# DANN Model (CNN for CARDD)
-# ============================================
-class CARDDModel(AbstractDANN):
-    """
-    CNN Model for DANN with SD2/Kontext adaptation.
-    
-    Architecture adapted for car damage detection:
-    - Feature Extractor: ResNet-like CNN backbone
-    - Label Classifier: Binary classification (damaged/not damaged)
-    - Domain Classifier: Binary classification (SD2/Kontext)
-    """
-
-    def __init__(self, num_classes=2, input_size=224):
-        """
-        Initialize CARDD model.
-        
-        Args:
-            num_classes: Number of label classes (default: 2 for binary classification)
-            input_size: Input image size (default: 224)
-        """
-        self.num_classes = num_classes
-        self.input_size = input_size
-        super(CARDDModel, self).__init__()
-
-    def _build_feature_extractor(self) -> nn.Module:
-        """
-        Build the feature extraction CNN backbone with flattening.
-        
-        Uses a ResNet-like architecture adapted for car damage detection.
-        
-        Returns:
-            Feature extractor network that outputs flattened features
-        """
-        feature = nn.Sequential()
-        
-        # First conv block
-        feature.add_module('conv1', nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3))
-        feature.add_module('bn1', nn.BatchNorm2d(64))
-        feature.add_module('relu1', nn.ReLU(True))
-        feature.add_module('pool1', nn.MaxPool2d(kernel_size=3, stride=2, padding=1))
-        
-        # Second conv block
-        feature.add_module('conv2', nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1))
-        feature.add_module('bn2', nn.BatchNorm2d(128))
-        feature.add_module('relu2', nn.ReLU(True))
-        feature.add_module('pool2', nn.MaxPool2d(kernel_size=3, stride=2, padding=1))
-        
-        # Third conv block
-        feature.add_module('conv3', nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1))
-        feature.add_module('bn3', nn.BatchNorm2d(256))
-        feature.add_module('relu3', nn.ReLU(True))
-        feature.add_module('pool3', nn.AdaptiveAvgPool2d((4, 4)))
-        
-        # Flatten
-        feature.add_module('flatten', nn.Flatten())
-        
-        return feature
-
-    def _build_label_classifier(self) -> nn.Module:
-        """
-        Build the label classification head (damage detection: damaged/not damaged).
-        
-        Returns:
-            Label classifier network (output: 2 classes with LogSoftmax)
-        """
-        feature_dim = self._get_feature_dim()
-        class_classifier = nn.Sequential()
-        class_classifier.add_module('fc1', nn.Linear(feature_dim, 512))
-        class_classifier.add_module('bn1', nn.BatchNorm1d(512))
-        class_classifier.add_module('relu1', nn.ReLU(True))
-        class_classifier.add_module('drop1', nn.Dropout(0.2))
-        class_classifier.add_module('fc2', nn.Linear(512, 256))
-        class_classifier.add_module('bn2', nn.BatchNorm1d(256))
-        class_classifier.add_module('relu2', nn.ReLU(True))
-        class_classifier.add_module('drop2', nn.Dropout(0.2))
-        class_classifier.add_module('fc3', nn.Linear(256, self.num_classes))
-        class_classifier.add_module('softmax', nn.LogSoftmax(dim=1))
-        return class_classifier
-
-    def _build_domain_classifier(self) -> nn.Module:
-        """
-        Build the domain classification head (SD2 vs Kontext).
-
-        Returns:
-            Domain classifier network (output: 2 classes with LogSoftmax)
-        """
-        feature_dim = self._get_feature_dim()
-        domain_classifier = nn.Sequential()
-        domain_classifier.add_module('fc1', nn.Linear(feature_dim, 512))
-        domain_classifier.add_module('bn1', nn.BatchNorm1d(512))
-        domain_classifier.add_module('relu1', nn.ReLU(True))
-        domain_classifier.add_module('drop1', nn.Dropout(0.2))
-        domain_classifier.add_module('fc2', nn.Linear(512, 2))
-        domain_classifier.add_module('softmax', nn.LogSoftmax(dim=1))
-        return domain_classifier
-
-    def _get_feature_dim(self) -> int:
-        """
-        Get the flattened feature dimension.
-        
-        Feature extractor output: 256 channels * 4 * 4 = 4096
-        
-        Returns:
-            Flattened feature dimension (4096)
-        """
-        return 256 * 4 * 4
-
-
 # ============================================
 # Data Loading Classes (using Abstract Base Classes)
 # ============================================
@@ -512,31 +401,142 @@ class KontextLoader(AbstractDANNLoader):
 
         return train_loader, test_loader
 
+
+class QwenLoader(AbstractDANNLoader):
+    """
+    Qwen data loader class using AbstractDANNLoader.
+    """
+
+    def __init__(self, data_root: str = '../cardd_data'):
+        """
+        Initialize Qwen loader.
+
+        Args:
+            data_root: Root directory for CARDD data
+        """
+        self.data_root = Path(data_root)
+
+    def get_loaders(self, batch_size=32, image_size=224, sample_size=None, random_seed=42, load_to_memory=True, **kwargs):
+        """
+        Get Qwen data loaders.
+
+        Args:
+            batch_size: Batch size for data loading
+            image_size: Image size (default: 224)
+            sample_size: If provided, load only this many random samples per dataset
+            random_seed: Random seed for reproducible sampling
+            load_to_memory: If True, load all images into memory at initialization
+            **kwargs: Additional arguments
+
+        Returns:
+            train_loader, test_loader: DataLoaders for Qwen
+        """
+        # Create transforms
+        transform = self.create_default_transform(
+            image_size=image_size,
+            grayscale_to_rgb=False,  # Images are already RGB
+            normalize_mean=(0.485, 0.456, 0.406),  # ImageNet normalization
+            normalize_std=(0.229, 0.224, 0.225)
+        )
+
+        # Load Qwen dataset
+        train_dataset = CARDDDataset(
+            root=str(self.data_root),
+            domain='qwen',
+            train=True,
+            transform=transform,
+            sample_size=sample_size,
+            random_seed=random_seed,
+            load_to_memory=load_to_memory
+        )
+
+        test_dataset = CARDDDataset(
+            root=str(self.data_root),
+            domain='qwen',
+            train=False,
+            transform=transform,
+            sample_size=500 if sample_size is not None else sample_size,
+            random_seed=random_seed,
+            load_to_memory=load_to_memory
+        )
+
+        # Create data loaders
+        train_loader = self.create_dataloader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=True
+        )
+        test_loader = self.create_dataloader(
+            test_dataset,
+            batch_size=batch_size,
+            shuffle=False
+        )
+
+        return train_loader, test_loader
+
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Train DANN for CARDD SD2 → Kontext adaptation')
-    parser.add_argument('--sample_size', type=int, default=2000, help='Number of samples to use for training (test uses 500 if sampling enabled)')
-    parser.add_argument('--image_size', type=int, default=224, help='Input image size (square)')
-    parser.add_argument('--n_epoch', type=int, default=5, help='Number of training epochs')
+    parser = argparse.ArgumentParser(description='Train DANN for CARDD domain adaptation')
+    parser.add_argument('--source', type=str, default='sd2', choices=['sd2', 'kontext', 'qwen'],
+                       help='Source domain for domain adaptation (default: sd2)')
+    parser.add_argument('--target', type=str, default='kontext', choices=['sd2', 'kontext', 'qwen'],
+                       help='Target domain for domain adaptation (default: kontext)')
+    parser.add_argument('--sample_size', type=int, default=None, help='Number of samples to use for training (None = use all data, test uses 500 if sampling enabled)')
+    parser.add_argument('--target_size', type=int, default=224, help='Target image size (square)')
+    parser.add_argument('--epochs', type=int, default=20, help='Number of training epochs')
     parser.add_argument('--batch_size', type=int, default=64, help='Batch size for training')
     parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
-    parser.add_argument('--gamma', type=float, default=5.0, help='Domain adaptation parameter gamma')
+    parser.add_argument('--gamma', type=float, default=10.0, help='Domain adaptation parameter gamma')
     parser.add_argument('--zeta', type=float, default=1.0, help='Domain adaptation parameter zeta')
     parser.add_argument('--save_dir', type=str, default="./models_cardd", help='Directory to save trained models')
 
     args = parser.parse_args()
 
+    # Validate that source and target domains are different
+    if args.source == args.target:
+        raise ValueError(f"Source domain ({args.source}) and target domain ({args.target}) must be different")
+
     # ============================================
-    source_name, target_name = 'sd2', 'kontext'
+    # Domain loader mapping
+    DOMAIN_LOADER_MAP = {
+        'sd2': SD2Loader,
+        'kontext': KontextLoader,
+        'qwen': QwenLoader
+    }
+
+    source_name, target_name = args.source, args.target
+
     def get_src_loaders(batch_size=64, **kwargs):
-        loader = SD2Loader()
-        return loader.get_loaders(batch_size=batch_size, image_size=args.image_size, load_to_memory=True, sample_size=args.sample_size, random_seed=42, **kwargs)
+        loader_class = DOMAIN_LOADER_MAP[source_name]
+        if loader_class is None:
+            raise ValueError(f"Loader for domain '{source_name}' is not implemented yet")
+        loader = loader_class()
+        return loader.get_loaders(batch_size=batch_size, image_size=args.target_size, load_to_memory=True, sample_size=args.sample_size, random_seed=42, **kwargs)
 
     def get_tgt_loaders(batch_size=64, **kwargs):
-        loader = KontextLoader()
-        return loader.get_loaders(batch_size=batch_size, image_size=args.image_size, load_to_memory=True, sample_size=args.sample_size, random_seed=42, **kwargs)
+        loader_class = DOMAIN_LOADER_MAP[target_name]
+        if loader_class is None:
+            raise ValueError(f"Loader for domain '{target_name}' is not implemented yet")
+        loader = loader_class()
+        return loader.get_loaders(batch_size=batch_size, image_size=args.target_size, load_to_memory=True, sample_size=args.sample_size, random_seed=42, **kwargs)
+
+    print("=" * 60)
+    print("DOMAIN ADVERSARIAL NEURAL NETWORK (DANN)")
+    print("=" * 60)
+    print(f"Source domain: {source_name.upper()}")
+    print(f"Target domain: {target_name.upper()}")
+    print(f"Sample size: {args.sample_size or 'Full dataset'}")
+    print(f"Target size: {args.target_size}x{args.target_size}")
+    print(f"Batch size: {args.batch_size}")
+    print(f"Learning rate: {args.lr}")
+    print(f"Epochs: {args.epochs}")
+    print(f"Gamma: {args.gamma}")
+    print(f"Zeta: {args.zeta}")
+    print(f"Save directory: {args.save_dir}")
+    print("=" * 60)
 
     train_dann(
-        n_epoch=args.n_epoch,
+        n_epoch=args.epochs,
         batch_size=args.batch_size,
         lr=args.lr,
         gamma=args.gamma,

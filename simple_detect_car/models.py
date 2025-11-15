@@ -6,7 +6,7 @@ Model definitions for car image binary classification.
 from typing import Tuple
 import torch
 import torch.nn as nn
-from model_arch_lib.model_deep import CNNClassifier
+from model_arch_lib.model_shallow import CNNClassifier
 
 def get_model(model_name: str, input_size: int = None, **kwargs):
     """
