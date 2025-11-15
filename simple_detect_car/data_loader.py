@@ -135,7 +135,7 @@ class CarDDDataset(Dataset):
         domain_mapping = {
             'sd2': ['SD2'],
             'kontext': ['Kontext'],
-            'qwen': ['Qwen Image Edit'],
+            'qwen': ['Qwen'],
             'sd2_kontext': ['SD2', 'Kontext']
         }
         if self.domain not in domain_mapping:
@@ -338,7 +338,7 @@ class CarDDDataset(Dataset):
 
         return img, label
 
-    def get_pair_image(self) -> Tuple[np.ndarray, np.ndarray]:
+    def get_pair_image(self) -> Tuple[np.ndarray, np.ndarray, Dict]:
         """
         Efficiently get a random pair of original and processed images directly from metadata.
 
@@ -346,7 +346,8 @@ class CarDDDataset(Dataset):
             index: Ignored - always returns a random pair from metadata
 
         Returns:
-            Tuple of (original_image, processed_image) as numpy arrays
+            Tuple of (original_image, processed_image, metadata) where images are numpy arrays
+            and metadata is the JSON metadata dict containing prompt information
         """
         import glob
 
@@ -370,7 +371,10 @@ class CarDDDataset(Dataset):
         # Build full processed path
         if processed_path:
             processed_filename = os.path.basename(processed_path)
-            full_processed_path = os.path.join(self.data_dir, processed_filename)
+            # Find which metadata directory this file came from to get the corresponding data directory
+            metadata_dir = os.path.dirname(json_file)
+            data_dir_idx = self.metadata_dirs.index(metadata_dir)
+            full_processed_path = os.path.join(self.data_dirs[data_dir_idx], processed_filename)
         else:
             full_processed_path = ''
 
@@ -388,7 +392,7 @@ class CarDDDataset(Dataset):
             raise ValueError(f"Could not load image: {full_processed_path}")
         processed_img = cv2.cvtColor(processed_img, cv2.COLOR_BGR2RGB)
 
-        return original_img, processed_img
+        return original_img, processed_img, metadata
 
 def create_dataloader(dataset,
                      batch_size: int = 8,
@@ -430,13 +434,14 @@ def create_dataloader(dataset,
 
 # Example usage and testing
 if __name__ == "__main__":
-    def plot_pair_demo(original_img: np.ndarray, processed_img: np.ndarray):
+    def plot_pair_demo(original_img: np.ndarray, processed_img: np.ndarray, domain: str = "SD2"):
         """
             Demo function to plot a pair of original and processed images side by side.
-        
+
         Args:
             original_img: Original image as numpy array
             processed_img: Processed image as numpy array
+            domain: Domain name to display in the title
         """
         if not MATPLOTLIB_AVAILABLE:
             print("Matplotlib not available - cannot plot images")
@@ -455,12 +460,9 @@ if __name__ == "__main__":
         ax2.axis('off')
 
         # Main title
-        plt.suptitle("Random Image Pair from CarDD Dataset",
+        plt.suptitle(f"Random Image Pair from CarDD - {domain.upper()}",
                     fontsize=16, fontweight='bold', y=0.98)
 
-        # Add some info text
-        fig.text(0.02, 0.02, "Dataset: CarDD (Car Damage Detection)\nMethod: get_pair_image() - Efficient random sampling from metadata",
-                fontsize=10, style='italic', bbox=dict(boxstyle="round,pad=0.3", facecolor="lightblue", alpha=0.5))
 
         plt.tight_layout()
         plt.show()
@@ -475,10 +477,10 @@ if __name__ == "__main__":
     # 1. Create the CarDDDataset
     print("\n1. Creating CarDDDataset...")
     dataset = CarDDDataset(
-        domain='sd2',
+        domain='kontext',
         train=True,
         sample_size=10,  # Use small sample for demo
-        random_seed=2
+        random_seed=20
     )  # Uses default root='../cardd_data'
 
     print(f"   Dataset size: {len(dataset)} samples")
@@ -509,15 +511,25 @@ if __name__ == "__main__":
     print("\n5. Demonstrating get_pair_image method...")
     if MATPLOTLIB_AVAILABLE:
         try:
-            # Get a random pair of images
-            original_img, processed_img = dataset.get_pair_image()
+            # Get a random pair of images and metadata
+            original_img, processed_img, metadata = dataset.get_pair_image()
 
             print(f"   Successfully loaded image pair!")
             print(f"   Original image shape: {original_img.shape}")
             print(f"   Processed image shape: {processed_img.shape}")
 
+            # Print prompt information from the metadata
+            print("   Prompt information:")
+            if 'tool_parameters' in metadata and 'prompt' in metadata['tool_parameters']:
+                prompt = metadata['tool_parameters']['prompt']
+                negative_prompt = metadata['tool_parameters'].get('negative_prompt', 'None')
+                print(f"     Prompt: {prompt}")
+                print(f"     Negative Prompt: {negative_prompt}")
+            else:
+                print("     No prompt information available")
+
             # Plot the images
-            plot_pair_demo(original_img, processed_img)
+            plot_pair_demo(original_img, processed_img, domain=dataset.domain)
 
         except Exception as e:
             print(f"   Error demonstrating image pair: {e}")

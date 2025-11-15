@@ -198,23 +198,24 @@ if ! command -v uv &> /dev/null; then
     curl -LsSf https://astral.sh/uv/install.sh | sh
 fi
 
-# Add uv to PATH for this session
-export PATH="\$HOME/.cargo/bin:\$PATH"
+# Source uv environment
+source "$HOME/.local/bin/env"
 
 # Check if virtual environment exists, create if needed
 if [ ! -d ~/ResponsibleAI/.venv ]; then
     echo "Creating virtual environment..."
     cd ~/ResponsibleAI
     uv venv
-    echo "Installing dependencies..."
+    echo "Installing PyTorch with CUDA support..."
     uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-    uv pip install tqdm matplotlib scikit-learn pillow
+    echo "Installing other dependencies from requirements.txt..."
+    uv pip install -r ec2_scripts/requirements.txt
 fi
 
 # Create screen session and run training
 screen -dmS $UNIQUE_SESSION bash --noprofile --norc -c "
 # Set up environment for this session
-export PATH=\\"\$HOME/.cargo/bin:\$PATH\\"
+source "$HOME/.local/bin/env"
 
 echo '======================================================================' > ~/ResponsibleAI/$TRAINING_DIR/training_log_\${UNIQUE_SESSION}.txt
 echo '$SCRIPT_DESC - Started \$(date)' >> ~/ResponsibleAI/$TRAINING_DIR/training_log_\${UNIQUE_SESSION}.txt

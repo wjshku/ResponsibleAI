@@ -100,15 +100,15 @@ def main():
     elif test_domain_choice == "2":
         test_domains = ["Kontext"]
     elif test_domain_choice == "3":
-        test_domains = ["Qwen Image Edit"]
+        test_domains = ["Qwen"]
     elif test_domain_choice == "4":
         test_domains = ["SD2", "Kontext"]
     elif test_domain_choice == "5":
-        test_domains = ["SD2", "Qwen Image Edit"]
+        test_domains = ["SD2", "Qwen"]
     elif test_domain_choice == "6":
-        test_domains = ["Kontext", "Qwen Image Edit"]
+        test_domains = ["Kontext", "Qwen"]
     elif test_domain_choice == "7":
-        test_domains = ["SD2", "Kontext", "Qwen Image Edit"]
+        test_domains = ["SD2", "Kontext", "Qwen"]
     else:
         print("Invalid choice, defaulting to SD2 only")
         test_domains = ["SD2"]
@@ -258,7 +258,7 @@ def main():
     domain_name_map = {
         'SD2': 'sd2',
         'Kontext': 'kontext',
-        'Qwen Image Edit': 'qwen'
+        'Qwen': 'qwen'
     }
 
     for domain in test_domains:

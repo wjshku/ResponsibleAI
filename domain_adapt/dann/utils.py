@@ -601,6 +601,127 @@ def save_training_summary(tracker: TrainingTracker, model: nn.Module,
     print(f"Training summary saved to {filepath}")
 
 
+def select_model_interactively(models_dir: str) -> str:
+    """
+    Interactively select a trained model from available models.
+
+    Args:
+        models_dir: Directory containing trained model folders
+
+    Returns:
+        Path to selected model file
+    """
+    import os
+
+    if not os.path.exists(models_dir):
+        raise ValueError(f"Models directory does not exist: {models_dir}")
+
+    # Get all model directories
+    model_dirs = [d for d in os.listdir(models_dir)
+                  if os.path.isdir(os.path.join(models_dir, d)) and d.startswith('model_dann_')]
+
+    if not model_dirs:
+        raise ValueError(f"No model directories found in {models_dir}")
+
+    # Sort by timestamp (newest first)
+    model_dirs.sort(reverse=True)
+
+    print("\nAvailable trained models:")
+    print("=" * 50)
+
+    # Display available models with their metadata
+    for i, model_dir in enumerate(model_dirs, 1):
+        model_path = os.path.join(models_dir, model_dir)
+        training_summary = os.path.join(model_path, 'training_summary.json')
+
+        print(f"{i}. {model_dir}")
+
+        # Try to read training summary for more info
+        if os.path.exists(training_summary):
+            try:
+                with open(training_summary, 'r') as f:
+                    summary = json.load(f)
+
+                config = summary.get('config', {})
+                source = config.get('source_name', 'Unknown')
+                target = config.get('target_name', 'Unknown')
+                best_acc = summary.get('best_accuracies', {}).get('target', 'N/A')
+                if isinstance(best_acc, (int, float)):
+                    best_acc = f'{best_acc:.3f}'
+
+                print(f"   Source: {source.upper()}, Target: {target.upper()}, Best Acc: {best_acc}")
+            except:
+                print("   (Could not read summary)")
+        else:
+            print("   (No summary available)")
+
+        # Check available model files
+        model_files = [f for f in os.listdir(model_path) if f.endswith('.pth')]
+        if model_files:
+            print(f"   Available models: {', '.join(model_files)}")
+        print()
+
+    # Get user selection
+    while True:
+        try:
+            choice = input(f"Select model (1-{len(model_dirs)}): ").strip()
+
+            if not choice:
+                # Default to most recent
+                selected_idx = 0
+                print(f"Using most recent model: {model_dirs[selected_idx]}")
+                break
+
+            selected_idx = int(choice) - 1
+            if 0 <= selected_idx < len(model_dirs):
+                break
+            else:
+                print(f"Please enter a number between 1 and {len(model_dirs)}")
+
+        except ValueError:
+            print("Please enter a valid number")
+
+    selected_dir = model_dirs[selected_idx]
+    model_path = os.path.join(models_dir, selected_dir)
+
+    # Now select which model file to use
+    model_files = [f for f in os.listdir(model_path) if f.endswith('.pth')]
+
+    if len(model_files) == 1:
+        selected_file = model_files[0]
+    else:
+        print(f"\nAvailable model files in {selected_dir}:")
+        for i, model_file in enumerate(model_files, 1):
+            print(f"{i}. {model_file}")
+
+        while True:
+            try:
+                choice = input(f"Select model file (1-{len(model_files)}), or press Enter for best_target_model.pth: ").strip()
+
+                if not choice:
+                    # Default to best_target_model.pth if available, otherwise first file
+                    if 'best_target_model.pth' in model_files:
+                        selected_file = 'best_target_model.pth'
+                    else:
+                        selected_file = model_files[0]
+                    print(f"Using default model: {selected_file}")
+                    break
+
+                selected_idx = int(choice) - 1
+                if 0 <= selected_idx < len(model_files):
+                    selected_file = model_files[selected_idx]
+                    break
+                else:
+                    print(f"Please enter a number between 1 and {len(model_files)}")
+
+            except ValueError:
+                print("Please enter a valid number")
+
+    final_path = os.path.join(model_path, selected_file)
+    print(f"\nSelected model: {final_path}")
+    return final_path
+
+
 if __name__ == "__main__":
     # Example usage
     tracker = create_tracker()

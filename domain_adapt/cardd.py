@@ -27,13 +27,15 @@ import argparse
 
 from dann.train_dann import *
 from dann.loader_dann import AbstractDANNDataset, AbstractDANNLoader, create_loader_function
+from dann.eval_dann import evaluate_dann_model
+from dann.utils import select_model_interactively
 from model_arch_lib.model_deep import CARDDModel
 
 # Domain name mapping for folder paths
 DOMAIN_FOLDER_MAP = {
     'sd2': 'SD2',
     'kontext': 'Kontext',
-    'qwen': 'Qwen Image Edit'
+    'qwen': 'Qwen'
 }
 
 
@@ -51,14 +53,15 @@ class CARDDDataset(AbstractDANNDataset):
     Enhanced with robust path handling, sampling, and memory loading capabilities.
     """
 
-    def __init__(self, root, domain='sd2', train=True, transform=None, sample_size=None, random_seed=42, load_to_memory=True):
+    def __init__(self, root, domain='sd2', train=True, split=None, transform=None, sample_size=None, random_seed=42, load_to_memory=True):
         """
         Initialize the CARDD dataset for binary classification.
 
         Args:
             root: Root directory containing GenAI_Results
-            domain: Domain name ('sd2' or 'kontext')
-            train: Whether to load training or test set
+            domain: Domain name ('sd2' or 'kontext' or 'qwen')
+            train: Whether to load training or test set (deprecated, use split instead)
+            split: Dataset split ('TR', 'VAL', or 'TE'). If None, uses train parameter
             transform: Optional transform to apply
             sample_size: If provided, load only this many random samples
             random_seed: Random seed for reproducible sampling
@@ -75,8 +78,16 @@ class CARDDDataset(AbstractDANNDataset):
         if self.domain not in ['sd2', 'kontext', 'qwen']:
             raise ValueError(f"Domain must be 'sd2', 'kontext', or 'qwen', got '{domain}'")
 
-        # Set split name
-        split = 'CarDD-TR' if train else 'CarDD-VAL'
+        # Set split name - support TR, VAL, or TE
+        if split is not None:
+            split_upper = split.upper()
+            if split_upper in ['TR', 'VAL', 'TE']:
+                split = f'CarDD-{split_upper}'
+            else:
+                raise ValueError(f"Split must be 'TR', 'VAL', or 'TE', got '{split}'")
+        else:
+            # Backward compatibility: use train parameter
+            split = 'CarDD-TR' if train else 'CarDD-VAL'
 
         # Construct data and metadata directories
         folder_name = DOMAIN_FOLDER_MAP.get(self.domain, self.domain.upper())
@@ -91,7 +102,7 @@ class CARDDDataset(AbstractDANNDataset):
         json_pattern = os.path.join(self.metadata_dir, 'processing_*.json')
         json_files = glob.glob(json_pattern)
 
-        print(f"Loading image paths from {len(json_files)} JSON files...")
+        print(f"Loading image paths (Split: {split} - Domain: {domain}) from {len(json_files)} JSON files...")
 
         for json_file in json_files:
             try:
@@ -254,23 +265,28 @@ class CARDDDataset(AbstractDANNDataset):
 # ============================================
 # Data Loading Classes (using Abstract Base Classes)
 # ============================================
-class SD2Loader(AbstractDANNLoader):
+class CARDDLoader(AbstractDANNLoader):
     """
-    SD2 data loader class using AbstractDANNLoader.
+    Unified CARDD data loader class for all domains (SD2, Kontext, Qwen).
     """
 
-    def __init__(self, data_root: str = '../cardd_data'):
+    def __init__(self, domain: str, data_root: str = '../cardd_data'):
         """
-        Initialize SD2 loader.
+        Initialize CARDD loader for a specific domain.
 
         Args:
+            domain: Domain name ('sd2', 'kontext', or 'qwen')
             data_root: Root directory for CARDD data
         """
+        if domain not in ['sd2', 'kontext', 'qwen']:
+            raise ValueError(f"Domain must be 'sd2', 'kontext', or 'qwen', got '{domain}'")
+
+        self.domain = domain
         self.data_root = Path(data_root)
 
-    def get_loaders(self, batch_size=32, image_size=224, sample_size=None, random_seed=42, load_to_memory=True, **kwargs):
+    def get_loaders(self, batch_size=32, image_size=224, sample_size=None, random_seed=42, load_to_memory=True, split=None, **kwargs):
         """
-        Get SD2 data loaders.
+        Get CARDD data loaders for the specified domain.
 
         Args:
             batch_size: Batch size for data loading
@@ -278,10 +294,11 @@ class SD2Loader(AbstractDANNLoader):
             sample_size: If provided, load only this many random samples per dataset
             random_seed: Random seed for reproducible sampling
             load_to_memory: If True, load all images into memory at initialization
+            split: Dataset split ('TR', 'VAL', or 'TE'). If None, uses default splits
             **kwargs: Additional arguments
 
         Returns:
-            train_loader, test_loader: DataLoaders for SD2
+            train_loader, test_loader: DataLoaders for the specified domain
         """
         # Create transforms
         transform = self.create_default_transform(
@@ -291,192 +308,84 @@ class SD2Loader(AbstractDANNLoader):
             normalize_std=(0.229, 0.224, 0.225)
         )
 
-        # Load SD2 dataset
-        train_dataset = CARDDDataset(
-            root=str(self.data_root),
-            domain='sd2',
-            train=True,
-            transform=transform,
-            sample_size=sample_size,
-            random_seed=random_seed,
-            load_to_memory=load_to_memory
-        )
+        # Load dataset based on split parameter
+        if split is not None:
+            train_dataset = None
+            
+            test_dataset = CARDDDataset(
+                root=str(self.data_root),
+                domain=self.domain,
+                split=split,
+                transform=transform,
+                sample_size=500 if sample_size is not None else sample_size,
+                random_seed=random_seed,
+                load_to_memory=load_to_memory
+            )
 
-        test_dataset = CARDDDataset(
-            root=str(self.data_root),
-            domain='sd2',
-            train=False,
-            transform=transform,
-            sample_size=500 if sample_size is not None else sample_size,
-            random_seed=random_seed,
-            load_to_memory=load_to_memory
-        )
+            # Create data loaders
+            train_loader = None
 
-        # Create data loaders
-        train_loader = self.create_dataloader(
-            train_dataset,
-            batch_size=batch_size,
-            shuffle=True
-        )
+            test_loader = self.create_dataloader(
+                test_dataset,
+                batch_size=batch_size,
+                shuffle=False
+            )
+        else:
+            # Default behavior: TR for train, VAL for test
+            train_dataset = CARDDDataset(
+                root=str(self.data_root),
+                domain=self.domain,
+                train=True,
+                transform=transform,
+                sample_size=sample_size,
+                random_seed=random_seed,
+                load_to_memory=load_to_memory
+            )
 
-        test_loader = self.create_dataloader(
-            test_dataset,
-            batch_size=batch_size,
-            shuffle=False
-        )
+            test_dataset = CARDDDataset(
+                root=str(self.data_root),
+                domain=self.domain,
+                train=False,
+                transform=transform,
+                sample_size=500 if sample_size is not None else sample_size,
+                random_seed=random_seed,
+                load_to_memory=load_to_memory
+            )
 
-        return train_loader, test_loader
+            # Create data loaders
+            train_loader = self.create_dataloader(
+                train_dataset,
+                batch_size=batch_size,
+                shuffle=True
+            )
 
-
-class KontextLoader(AbstractDANNLoader):
-    """
-    Kontext data loader class using AbstractDANNLoader.
-    """
-
-    def __init__(self, data_root: str = '../cardd_data'):
-        """
-        Initialize Kontext loader.
-
-        Args:
-            data_root: Root directory for CARDD data
-        """
-        self.data_root = Path(data_root)
-
-    def get_loaders(self, batch_size=32, image_size=224, sample_size=None, random_seed=42, load_to_memory=True, **kwargs):
-        """
-        Get Kontext data loaders.
-
-        Args:
-            batch_size: Batch size for data loading
-            image_size: Image size (default: 224)
-            sample_size: If provided, load only this many random samples per dataset
-            random_seed: Random seed for reproducible sampling
-            load_to_memory: If True, load all images into memory at initialization
-            **kwargs: Additional arguments
-
-        Returns:
-            train_loader, test_loader: DataLoaders for Kontext
-        """
-        # Create transforms
-        transform = self.create_default_transform(
-            image_size=image_size,
-            grayscale_to_rgb=False,  # Images are already RGB
-            normalize_mean=(0.485, 0.456, 0.406),  # ImageNet normalization
-            normalize_std=(0.229, 0.224, 0.225)
-        )
-
-        # Load Kontext dataset
-        train_dataset = CARDDDataset(
-            root=str(self.data_root),
-            domain='kontext',
-            train=True,
-            transform=transform,
-            sample_size=sample_size,
-            random_seed=random_seed,
-            load_to_memory=load_to_memory
-        )
-
-        test_dataset = CARDDDataset(
-            root=str(self.data_root),
-            domain='kontext',
-            train=False,
-            transform=transform,
-            sample_size=500 if sample_size is not None else sample_size,
-            random_seed=random_seed,
-            load_to_memory=load_to_memory
-        )
-
-        # Create data loaders
-        train_loader = self.create_dataloader(
-            train_dataset,
-            batch_size=batch_size,
-            shuffle=True
-        )
-
-        test_loader = self.create_dataloader(
-            test_dataset,
-            batch_size=batch_size,
-            shuffle=False
-        )
+            test_loader = self.create_dataloader(
+                test_dataset,
+                batch_size=batch_size,
+                shuffle=False
+            )
 
         return train_loader, test_loader
 
 
-class QwenLoader(AbstractDANNLoader):
-    """
-    Qwen data loader class using AbstractDANNLoader.
-    """
+# Backward compatibility: create aliases for the old class names
+def SD2Loader(data_root: str = '../cardd_data'):
+    """Create SD2 loader (backward compatibility)."""
+    return CARDDLoader('sd2', data_root)
 
-    def __init__(self, data_root: str = '../cardd_data'):
-        """
-        Initialize Qwen loader.
+def KontextLoader(data_root: str = '../cardd_data'):
+    """Create Kontext loader (backward compatibility)."""
+    return CARDDLoader('kontext', data_root)
 
-        Args:
-            data_root: Root directory for CARDD data
-        """
-        self.data_root = Path(data_root)
-
-    def get_loaders(self, batch_size=32, image_size=224, sample_size=None, random_seed=42, load_to_memory=True, **kwargs):
-        """
-        Get Qwen data loaders.
-
-        Args:
-            batch_size: Batch size for data loading
-            image_size: Image size (default: 224)
-            sample_size: If provided, load only this many random samples per dataset
-            random_seed: Random seed for reproducible sampling
-            load_to_memory: If True, load all images into memory at initialization
-            **kwargs: Additional arguments
-
-        Returns:
-            train_loader, test_loader: DataLoaders for Qwen
-        """
-        # Create transforms
-        transform = self.create_default_transform(
-            image_size=image_size,
-            grayscale_to_rgb=False,  # Images are already RGB
-            normalize_mean=(0.485, 0.456, 0.406),  # ImageNet normalization
-            normalize_std=(0.229, 0.224, 0.225)
-        )
-
-        # Load Qwen dataset
-        train_dataset = CARDDDataset(
-            root=str(self.data_root),
-            domain='qwen',
-            train=True,
-            transform=transform,
-            sample_size=sample_size,
-            random_seed=random_seed,
-            load_to_memory=load_to_memory
-        )
-
-        test_dataset = CARDDDataset(
-            root=str(self.data_root),
-            domain='qwen',
-            train=False,
-            transform=transform,
-            sample_size=500 if sample_size is not None else sample_size,
-            random_seed=random_seed,
-            load_to_memory=load_to_memory
-        )
-
-        # Create data loaders
-        train_loader = self.create_dataloader(
-            train_dataset,
-            batch_size=batch_size,
-            shuffle=True
-        )
-        test_loader = self.create_dataloader(
-            test_dataset,
-            batch_size=batch_size,
-            shuffle=False
-        )
-
-        return train_loader, test_loader
+def QwenLoader(data_root: str = '../cardd_data'):
+    """Create Qwen loader (backward compatibility)."""
+    return CARDDLoader('qwen', data_root)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Train DANN for CARDD domain adaptation')
+    parser = argparse.ArgumentParser(description='Train or Test DANN for CARDD domain adaptation')
+    parser.add_argument('--mode', type=str, default='train', choices=['train', 'test'],
+                       help='Mode: train or test (default: train)')
     parser.add_argument('--source', type=str, default='sd2', choices=['sd2', 'kontext', 'qwen'],
                        help='Source domain for domain adaptation (default: sd2)')
     parser.add_argument('--target', type=str, default='kontext', choices=['sd2', 'kontext', 'qwen'],
@@ -488,9 +397,14 @@ if __name__ == "__main__":
     parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
     parser.add_argument('--gamma', type=float, default=10.0, help='Domain adaptation parameter gamma')
     parser.add_argument('--zeta', type=float, default=1.0, help='Domain adaptation parameter zeta')
-    parser.add_argument('--save_dir', type=str, default="./models_cardd", help='Directory to save trained models')
+    parser.add_argument('--save_dir', type=str, default="./models_cardd", help='Directory to save/load trained models')
+    parser.add_argument('--model_path', type=str, default=None, help='Path to trained model for testing (optional when mode=test, will prompt for selection)')
 
     args = parser.parse_args()
+
+    # Interactive model selection for testing
+    if args.mode == 'test' and args.model_path is None:
+        args.model_path = select_model_interactively(args.save_dir)
 
     # Validate that source and target domains are different
     if args.source == args.target:
@@ -521,31 +435,57 @@ if __name__ == "__main__":
         return loader.get_loaders(batch_size=batch_size, image_size=args.target_size, load_to_memory=True, sample_size=args.sample_size, random_seed=42, **kwargs)
 
     print("=" * 60)
-    print("DOMAIN ADVERSARIAL NEURAL NETWORK (DANN)")
+    if args.mode == 'train':
+        print("DOMAIN ADVERSARIAL NEURAL NETWORK (DANN) - TRAINING")
+    else:
+        print("DOMAIN ADVERSARIAL NEURAL NETWORK (DANN) - TESTING")
     print("=" * 60)
     print(f"Source domain: {source_name.upper()}")
     print(f"Target domain: {target_name.upper()}")
     print(f"Sample size: {args.sample_size or 'Full dataset'}")
     print(f"Target size: {args.target_size}x{args.target_size}")
     print(f"Batch size: {args.batch_size}")
-    print(f"Learning rate: {args.lr}")
-    print(f"Epochs: {args.epochs}")
-    print(f"Gamma: {args.gamma}")
-    print(f"Zeta: {args.zeta}")
+    if args.mode == 'train':
+        print(f"Learning rate: {args.lr}")
+        print(f"Epochs: {args.epochs}")
+        print(f"Gamma: {args.gamma}")
+        print(f"Zeta: {args.zeta}")
     print(f"Save directory: {args.save_dir}")
+    if args.mode == 'test':
+        print(f"Model path: {args.model_path}")
     print("=" * 60)
 
-    train_dann(
-        n_epoch=args.epochs,
-        batch_size=args.batch_size,
-        lr=args.lr,
-        gamma=args.gamma,
-        zeta=args.zeta,
-        save_dir=args.save_dir,
-        source_name=source_name,
-        get_src_loaders=get_src_loaders,
-        target_name=target_name,
-        get_tgt_loaders=get_tgt_loaders,
-        input_model=CARDDModel
-    )
+    if args.mode == 'train':
+        train_dann(
+            n_epoch=args.epochs,
+            batch_size=args.batch_size,
+            lr=args.lr,
+            gamma=args.gamma,
+            zeta=args.zeta,
+            target_size=args.target_size,
+            save_dir=args.save_dir,
+            source_name=source_name,
+            get_src_loaders=get_src_loaders,
+            target_name=target_name,
+            get_tgt_loaders=get_tgt_loaders,
+            input_model=CARDDModel
+        )
+    else:
+        # Testing mode
+        print("Loading model for testing...")
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+        # Load the trained model
+        model = CARDDModel()
+        model.load_state_dict(torch.load(args.model_path, map_location=device))
+        model.to(device)
+        model.eval()
+
+        print(f"Model loaded from: {args.model_path}")
+
+        # Evaluate using the function from eval_dann.py
+        evaluate_dann_model(model=model,
+                          get_src_loaders=get_src_loaders, get_tgt_loaders=get_tgt_loaders,
+                          source_name=source_name, target_name=target_name,
+                          batch_size=args.batch_size, print_results=True)
 

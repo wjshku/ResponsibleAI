@@ -255,6 +255,7 @@ def train_dann(source_name='mnist',
             save_interval=10,
             gamma=10.0,
             zeta=1.0,
+            target_size=224,
             save_dir=None):
     """
     Train DANN model for MNIST → MNIST-M adaptation.
@@ -268,6 +269,7 @@ def train_dann(source_name='mnist',
         save_interval: Save model every N epochs
         gamma: Sharpness of the lambda schedule (default 10.0)
         zeta: Maximum adaptation strength (default 1.0)
+        target_size: Target image size (default 224)
     """
     print("=" * 70)
     print("DOMAIN ADVERSARIAL NEURAL NETWORK (DANN)")
@@ -397,7 +399,8 @@ def train_dann(source_name='mnist',
         'learning_rate': lr,
         'save_interval': save_interval,
         'gamma': gamma,
-        'zeta': zeta
+        'zeta': zeta,
+        'target_size': target_size
     }
     save_training_summary(tracker, model, config)
 

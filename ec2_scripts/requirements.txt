@@ -1,8 +1,5 @@
-# PyTorch - install with CUDA support
-# Use: uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-torch>=2.0.0
-torchvision>=0.15.0
-torchaudio>=2.0.0
+# PyTorch packages installed separately with CUDA support
+# uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
 
 # Core ML/Data Science (Python 3.12 compatible)
 numpy>=1.26.0
